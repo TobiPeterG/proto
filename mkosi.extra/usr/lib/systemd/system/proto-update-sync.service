@@ -1,0 +1,16 @@
+[Unit]
+Description=Forward late /etc changes into a pending proto deployment
+ConditionPathExists=!/etc/proto-live
+After=local-fs.target
+Before=shutdown.target
+RequiresMountsFor=/efi /.system /var/lib/proto-update
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/true
+ExecStop=/usr/lib/proto-update sync-pending
+TimeoutStopSec=5min
+
+[Install]
+WantedBy=multi-user.target

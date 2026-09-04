@@ -1,0 +1,9 @@
+[Unit]
+Description=Prepare downloaded proto deployments
+ConditionPathExists=!/etc/proto-live
+After=local-fs.target
+RequiresMountsFor=/efi /.system /var/lib/proto-update
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/proto-update prepare-incoming

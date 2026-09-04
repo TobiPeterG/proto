@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 Proto contributors
+SPDX-License-Identifier: CC0-1.0
+-->
+<component type="operating-system">
+  <id>io.github.TobiPeterG.Proto.KDE</id>
+  <name>Proto KDE</name>
+  <summary>An image-based openSUSE Tumbleweed system with atomic updates</summary>
+
+  <pkgname>host</pkgname>
+  <metadata_license>CC0-1.0</metadata_license>
+
+  <description>
+    <p>Proto KDE is an image-based Linux operating system built from openSUSE Tumbleweed and the KDE Plasma desktop.</p>
+    <ul>
+      <li>Read-only EROFS system image for /usr</li>
+      <li>Versioned system deployments with atomic system updates</li>
+      <li>Delta updates using systemd-sysupdate and desync</li>
+      <li>Btrfs-backed mutable system and user state</li>
+      <li>Flatpak support for desktop applications</li>
+    </ul>
+  </description>
+
+  <developer_name>Proto Project</developer_name>
+  <project_group>Proto</project_group>
+
+  <provides>
+    <modalias>linux</modalias>
+  </provides>
+
+  <releases>
+    <release version="20260831" date="2026-08-31">
+      <description>
+        <p>Proto KDE system image 20260831.</p>
+      </description>
+    </release>
+  </releases>
+
+  <content_rating type="oars-1.1"/>
+</component>

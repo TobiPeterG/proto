@@ -1,0 +1,167 @@
+#!/bin/bash
+set -euo pipefail
+
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+
+die() {
+    echo "proto factory reset: $*" >&2
+    exit 1
+}
+
+cmdline_value() {
+    local key=$1 word
+    for word in $(</proc/cmdline); do
+        if [[ ${word} == "${key}="* ]]; then
+            printf '%s\n' "${word#*=}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+delete_subvolume() {
+    local path=$1
+    [[ -e ${path} ]] || return 0
+    btrfs subvolume show "${path}" >/dev/null 2>&1 || \
+        die "refusing to remove non-subvolume ${path}"
+    btrfs subvolume delete --recursive --commit-after "${path}"
+}
+
+deployment=$(cmdline_value system.deployment) || \
+    die 'the UKI does not identify its deployment'
+[[ ${deployment} =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || \
+    die 'the UKI contains an invalid deployment name'
+
+udevadm settle --timeout=60
+root_device=
+for candidate in \
+    /dev/gpt-auto-root-ignore-factory-reset \
+    /dev/disk/by-designator/root-ignore-factory-reset \
+    /dev/gpt-auto-root \
+    /dev/disk/by-designator/root; do
+    if [[ -b ${candidate} ]]; then
+        root_device=$(readlink -f -- "${candidate}")
+        break
+    fi
+done
+[[ -n ${root_device} ]] || die 'cannot find the Btrfs root partition'
+
+work=/run/proto-factory-reset
+top=${work}/top
+image_root=${work}/usr
+mkdir -p "${top}" "${image_root}"
+mounted_top=no
+mounted_image=no
+mounted_etc=no
+cleanup() {
+    if [[ ${mounted_etc} == yes ]]; then
+        umount "${top}/@root.factory-new/etc" 2>/dev/null || true
+    fi
+    if [[ ${mounted_image} == yes ]]; then
+        umount "${image_root}" 2>/dev/null || true
+    fi
+    if [[ ${mounted_top} == yes ]]; then
+        umount "${top}" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+
+mount -t btrfs -o subvol=/,rw "${root_device}" "${top}"
+mounted_top=yes
+store=${top}/@deployments
+[[ -f ${store}/${deployment}.usr.erofs ]] || \
+    die "deployment ${deployment} is missing from the immutable store"
+
+# Recover a power loss in the small rename window. The old root remains the
+# default subvolume until the replacement has its final name.
+if [[ -e ${top}/@root.factory-old ]]; then
+    if [[ -e ${top}/@root ]]; then
+        btrfs subvolume set-default "${top}/@root"
+        delete_subvolume "${top}/@root.factory-old"
+    else
+        mv "${top}/@root.factory-old" "${top}/@root"
+    fi
+fi
+shopt -s nullglob
+for old in "${top}"/@etc-*.factory-old; do
+    final=${old%.factory-old}
+    if [[ -e ${final} ]]; then
+        delete_subvolume "${old}"
+    else
+        mv "${old}" "${final}"
+    fi
+done
+
+delete_subvolume "${top}/@root.factory-new"
+for new in "${top}"/@etc-*.factory-new; do
+    delete_subvolume "${new}"
+done
+
+btrfs subvolume create "${top}/@root.factory-new"
+install -d -m 0755 \
+    "${top}/@root.factory-new"/{boot,dev,efi,etc,home,media,mnt,opt,proc,root,run,srv,system,sys,tmp,usr,var}
+
+# Build a factory /etc for every retained deployment so all retained UKIs stay
+# bootable after the reset. Use the active deployment for the root skeleton.
+declare -a deployments=()
+for image in "${store}"/*usr.erofs; do
+    dep=${image%/usr.erofs}
+    dep=${dep##*/}
+    [[ ${dep} =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || \
+        die "invalid deployment directory ${dep}"
+    deployments+=("${dep}")
+
+    mount -t erofs -o ro,loop "${image}" "${image_root}"
+    mounted_image=yes
+    [[ -d ${image_root}/share/factory/etc ]] || \
+        die "deployment ${dep} has no factory /etc"
+    btrfs subvolume create "${top}/@etc-${dep}.factory-new"
+    cp -a "${image_root}/share/factory/etc/." \
+        "${top}/@etc-${dep}.factory-new/"
+    if [[ ${dep} == "${deployment}" ]]; then
+        [[ -d ${image_root}/lib/proto/installer-root-skeleton ]] || \
+            die 'the active deployment has no root skeleton'
+        cp -a "${image_root}/lib/proto/installer-root-skeleton/." \
+            "${top}/@root.factory-new/"
+    fi
+
+    contexts=${top}/@etc-${dep}.factory-new/selinux/targeted/contexts/files/file_contexts
+    policy=$(find "${top}/@etc-${dep}.factory-new/selinux/targeted/policy" \
+        -maxdepth 1 -type f -name 'policy.*' -print | sort -V | tail -n1)
+    [[ -f ${contexts} && -n ${policy} && -f ${policy} ]] || \
+        die "deployment ${dep} has no usable SELinux policy"
+    mount --bind "${top}/@etc-${dep}.factory-new" \
+        "${top}/@root.factory-new/etc"
+    mounted_etc=yes
+    setfiles -mF -c "${policy}" -r "${top}/@root.factory-new" \
+        "${contexts}" "${top}/@root.factory-new"
+    umount "${top}/@root.factory-new/etc"
+    mounted_etc=no
+    umount "${image_root}"
+    mounted_image=no
+done
+(( ${#deployments[@]} > 0 )) || die 'the immutable deployment store is empty'
+
+# Only now replace the mutable hierarchy. The deployment store and ESP are
+# never mounted writable by this operation and are deliberately untouched.
+for current in "${top}"/@etc-*; do
+    [[ ${current} == *.factory-new || ${current} == *.factory-old ]] && continue
+    mv "${current}" "${current}.factory-old"
+done
+mv "${top}/@root" "${top}/@root.factory-old"
+mv "${top}/@root.factory-new" "${top}/@root"
+for dep in "${deployments[@]}"; do
+    mv "${top}/@etc-${dep}.factory-new" "${top}/@etc-${dep}"
+done
+btrfs subvolume set-default "${top}/@root"
+sync -f "${top}"
+
+delete_subvolume "${top}/@root.factory-old"
+for old in "${top}"/@etc-*.factory-old; do
+    delete_subvolume "${old}"
+done
+# Remove subvolumes from images installed with the former layout as part of
+# the mutable state migration. New installations keep home and var in @root.
+delete_subvolume "${top}/@home"
+delete_subvolume "${top}/@var"
+sync -f "${top}"

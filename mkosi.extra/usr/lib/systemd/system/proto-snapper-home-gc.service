@@ -1,0 +1,11 @@
+[Unit]
+Description=Remove stale per-user Snapper configurations
+ConditionPathIsReadWrite=/etc
+ConditionPathExists=!/etc/proto-live
+After=local-fs.target
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/proto-snapper-home-gc

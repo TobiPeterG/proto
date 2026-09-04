@@ -1,0 +1,2 @@
+enable ca-certificates-setup.service
+enable kde-linux-sysupdated.service

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Factory Reset
+Comment=Erase users, settings, and other mutable data
+Exec=/usr/libexec/proto-factory-reset
+Icon=edit-clear-all
+Terminal=false
+Categories=System;Settings;
+Keywords=reset;factory;erase;

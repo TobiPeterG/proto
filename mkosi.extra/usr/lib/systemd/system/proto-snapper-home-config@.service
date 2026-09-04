@@ -1,0 +1,12 @@
+[Unit]
+Description=Create a Snapper configuration for UID %i
+ConditionPathIsReadWrite=/etc
+ConditionPathExists=!/etc/proto-live
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+ExecCondition=/usr/bin/test %i -ge 1000
+ExecCondition=/usr/bin/test %i -lt 65534
+ExecStart=/usr/lib/proto-snapper-home-config %i

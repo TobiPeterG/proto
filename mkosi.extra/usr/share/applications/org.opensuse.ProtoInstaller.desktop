@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Install proto
+Comment=Install proto on this computer
+Exec=/usr/libexec/proto-installer
+Icon=drive-harddisk-system
+Terminal=false
+Categories=System;
+StartupNotify=true

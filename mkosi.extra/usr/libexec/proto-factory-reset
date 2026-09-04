@@ -1,0 +1,18 @@
+#!/bin/bash
+set -euo pipefail
+
+title='Reset proto'
+
+if [[ -e /etc/proto-live ]]; then
+    zenity --error --title="${title}" \
+        --text='Factory reset is available only after installation.'
+    exit 1
+fi
+
+zenity --question --title="${title}" \
+    --width=520 \
+    --ok-label='Reset and restart' \
+    --cancel-label='Cancel' \
+    --text='<b>Delete all users, settings, applications, containers and other mutable data?</b>\n\nThe installed UKIs and read-only system deployments are retained. This cannot be undone.' || exit 0
+
+pkexec /usr/bin/systemctl start factory-reset.target

@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch for complete proto update artifact pairs
+ConditionPathExists=!/etc/proto-live
+
+[Path]
+PathChanged=/var/lib/proto-update/incoming
+Unit=proto-update-prepare.service
+
+[Install]
+WantedBy=multi-user.target

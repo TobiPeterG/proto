@@ -1,0 +1,298 @@
+#!/bin/bash
+set -euo pipefail
+
+: "${IMAGE_ID:?mkosi did not export IMAGE_ID}"
+: "${IMAGE_VERSION:?mkosi did not export IMAGE_VERSION}"
+: "${ARCHITECTURE:?mkosi did not export ARCHITECTURE}"
+
+deployment="/@deployments/${IMAGE_ID}-${IMAGE_VERSION}.${ARCHITECTURE}.usr.erofs"
+install -d /@deployments
+
+# systemd-boot derives an automatic UKI entry title from PRETTY_NAME in the
+# embedded os-release section. Keep the distribution ID intact for package and
+# extension compatibility, but give the product and boot entry their own name.
+sed -i \
+    -e 's/^NAME=.*/NAME="proto"/' \
+    -e 's/^PRETTY_NAME=.*/PRETTY_NAME="Prototype Image System"/' \
+    /usr/lib/os-release
+
+# All mounts are generated from the UKI command line. Keep the packaged file
+# present but empty so that local image policy cannot accidentally add mounts.
+: > /etc/fstab
+: > /etc/machine-id
+
+# New local users get their own Btrfs home subvolume. A user@.service drop-in
+# creates the corresponding per-user Snapper configuration at first login.
+if grep -q '^BTRFS_SUBVOLUME_HOME=' /etc/default/useradd; then
+    sed -i 's/^BTRFS_SUBVOLUME_HOME=.*/BTRFS_SUBVOLUME_HOME=yes/' \
+        /etc/default/useradd
+else
+    printf '\n# Required for per-user Snapper snapshots.\nBTRFS_SUBVOLUME_HOME=yes\n' \
+        >> /etc/default/useradd
+fi
+
+# SELinux is part of the image contract rather than an opt-in boot mode.
+if [[ -f /etc/selinux/config ]]; then
+    sed -i \
+        -e 's/^SELINUX=.*/SELINUX=enforcing/' \
+        -e 's/^SELINUXTYPE=.*/SELINUXTYPE=targeted/' \
+        /etc/selinux/config
+else
+    install -d -m 0755 /etc/selinux
+    printf 'SELINUX=enforcing\nSELINUXTYPE=targeted\n' > /etc/selinux/config
+fi
+
+# The target starts with an empty /var and cannot rely on package-installation
+# state there. Make the essential network service explicit in /etc before the
+# factory snapshot is taken.
+systemctl enable NetworkManager.service
+systemctl enable tuned.service tuned-ppd.service
+systemctl enable snapper-timeline.timer snapper-cleanup.timer
+systemctl enable proto-update-prepare.path proto-update-sync.service
+# Only bless a counted UKI after the normal boot completed without failed
+# system units. systemd-bless-boot-generator pulls in the blessing service when
+# the firmware reports that the current UKI has a boot counter.
+systemctl enable systemd-boot-check-no-failures.service
+
+# This state file is changed whenever Snapper adds a user configuration. It is
+# created by tmpfiles on installed systems and must not be reset by an image
+# update. Create the directories now so the live image is also well formed.
+install -d -m 0755 /etc/snapper/configs /etc/sysconfig
+if [[ ! -e /etc/sysconfig/snapper ]]; then
+    printf 'SNAPPER_CONFIGS=""\n' > /etc/sysconfig/snapper
+    chmod 0644 /etc/sysconfig/snapper
+fi
+
+# openSUSE keeps the vendor skeleton in /usr/etc/skel. Materialize it in the
+# mutable /etc before creating the live user and before taking the factory /etc
+# copy used by the installed system.
+install -d -m 0755 /etc/skel
+cp -a /usr/etc/skel/. /etc/skel/
+
+# The installed system starts from this vendor-owned /etc. It is captured
+# before adding any live-only users, autologin, or authorization rules. Future
+# deployments can merge or snapshot this tree without baking /etc into the
+# deployment root.
+rm -rf /usr/share/factory/etc
+install -d -m 0755 /usr/share/factory/etc
+cp -a /etc/. /usr/share/factory/etc/
+: > /usr/share/factory/etc/fstab
+: > /usr/share/factory/etc/machine-id
+rm -f /usr/share/factory/etc/hostname
+rm -f /usr/share/factory/etc/ssh/ssh_host_* 2>/dev/null || true
+# Snapper owns and rewrites this file. The tmpfiles definition creates it only
+# when absent, thereby preserving the list across deployments and rollbacks.
+rm -f /usr/share/factory/etc/sysconfig/snapper
+# Track the exact vendor-owned content. Future deployments use these hashes to
+# update untouched files and preserve administrator changes.
+/usr/lib/proto-etc-factory seed /usr/share/factory/etc
+
+# Ship target-disk repart definitions with the immutable payload. The live
+# installer uses these with --copy-source=/ and --empty=force.
+installer_repart=/usr/lib/proto/installer-repart.d
+install -d -m 0755 "${installer_repart}"
+
+# Runtime consumers must not have to infer the deployment-specific /etc name
+# from a mutable file. This metadata is immutable and generated per image.
+cat > /usr/lib/proto/deployment.env <<EOF
+IMAGE_ID=${IMAGE_ID}
+IMAGE_VERSION=${IMAGE_VERSION}
+ETC_SUBVOLUME=@etc-${IMAGE_ID}-${IMAGE_VERSION}
+EOF
+
+# systemd-repart validates MakeSymlinks= sources inside the new filesystem.
+# The installed root intentionally has no /usr tree at installation time, so
+# links such as /bin -> usr/bin would otherwise fail validation. Copy these
+# pre-made relative links as an opaque root skeleton instead.
+installer_root_skeleton=/usr/lib/proto/installer-root-skeleton
+rm -rf "${installer_root_skeleton}"
+install -d -m 0755 "${installer_root_skeleton}"
+ln -s usr/bin "${installer_root_skeleton}/bin"
+ln -s usr/lib "${installer_root_skeleton}/lib"
+ln -s usr/lib64 "${installer_root_skeleton}/lib64"
+ln -s usr/sbin "${installer_root_skeleton}/sbin"
+
+cat > "${installer_repart}/00-esp.conf" <<'EOF'
+[Partition]
+Type=esp
+Format=vfat
+CopyFiles=/efi:/
+SizeMinBytes=4G
+SizeMaxBytes=4G
+EOF
+cat > "${installer_repart}/10-root.conf" <<EOF
+[Partition]
+Type=root
+Format=btrfs
+SizeMinBytes=8G
+CopyFiles=/.system/@deployments:/@deployments
+CopyFiles=/usr/lib/proto/installer-root-skeleton:/@root
+CopyFiles=/usr/share/factory/etc:/@etc-${IMAGE_ID}-${IMAGE_VERSION}
+MakeDirectories=/@root/dev /@root/efi /@root/etc /@root/home /@root/media /@root/mnt /@root/opt /@root/proc /@root/root /@root/run /@root/srv /@root/.system /@root/sys /@root/tmp /@root/usr /@root/var /@etc-${IMAGE_ID}-${IMAGE_VERSION} /@deployments
+Subvolumes=/@root /@etc-${IMAGE_ID}-${IMAGE_VERSION} /@deployments
+DefaultSubvolume=/@root
+EOF
+
+if [[ "${IMAGE_ID}" == proto-gnome ]]; then
+    # GNOME shows only the battery icon by default. Make the percentage a
+    # vendor default for both the live account and users created later by
+    # gnome-initial-setup. This must happen before the EROFS is generated.
+    install -d -m 0755 /usr/share/glib-2.0/schemas
+    cat > /usr/share/glib-2.0/schemas/90-proto.gschema.override <<'EOF'
+[org.gnome.desktop.interface]
+show-battery-percentage=true
+EOF
+    glib-compile-schemas /usr/share/glib-2.0/schemas
+fi
+
+# mkosi's built-in relabel pass runs after finalize scripts. Since the image is
+# produced here, label /usr explicitly before sealing it into EROFS. The
+# installed mutable trees are relabeled by the installer after CopyFiles=.
+selinux_type=$(sed -n 's/^SELINUXTYPE=//p' /etc/selinux/config | tail -n1)
+selinux_type=${selinux_type:-targeted}
+selinux_contexts="/etc/selinux/${selinux_type}/contexts/files/file_contexts"
+selinux_policy=$(find "/etc/selinux/${selinux_type}/policy" \
+    -maxdepth 1 -type f -name 'policy.*' -print | sort -V | tail -n1)
+[[ -f "${selinux_contexts}" ]] || {
+    printf 'SELinux file contexts not found: %s\n' "${selinux_contexts}" >&2
+    exit 1
+}
+[[ -n "${selinux_policy}" && -f "${selinux_policy}" ]] || {
+    printf 'SELinux binary policy not found for type %s\n' "${selinux_type}" >&2
+    exit 1
+}
+# Relabel disabled
+#setfiles -mF -c "${selinux_policy}" "${selinux_contexts}" /usr
+
+# Keep this as a naked filesystem image. The initrd mounts it through a loop
+# device using rd.systemd.mount-extra= after the Btrfs root is available.
+mkfs.erofs \
+    -T "${SOURCE_DATE_EPOCH:?mkosi did not export SOURCE_DATE_EPOCH}" \
+    --ignore-mtime \
+    "${deployment}" \
+    /usr
+
+# Besides embedding the deployment in the installation disk, publish the same
+# bytes as a first-class update artifact next to the split UKI.
+install -m 0644 \
+    "${deployment}" \
+    "${CHROOT_OUTPUTDIR}/${IMAGE_ID}-${IMAGE_VERSION}.${ARCHITECTURE}.usr.erofs"
+
+# Both desktop disk images double as live media. Their mutable state gets a
+# passwordless autologin account and authorization for the installer. None of
+# this is present in /usr/share/factory/etc, so it is not copied to the target.
+if [[ "${IMAGE_ID}" == proto-gnome || "${IMAGE_ID}" == kde ]]; then
+    if [[ "${IMAGE_ID}" == proto-kde ]]; then
+        # Put Plasma's live-only policy into the skeleton before useradd so the
+        # account creation code copies it with the correct ownership even when
+        # mkosi builds in a user namespace where an explicit chown is rejected.
+        install -d -m 0700 /etc/skel/.config
+        cat > /etc/skel/.config/kscreenlockerrc <<'EOF'
+[Daemon]
+Autolock=false
+LockOnResume=false
+EOF
+        cat > /etc/skel/.config/kdeglobals <<'EOF'
+[KDE Action Restrictions]
+action/lock_screen=false
+EOF
+    fi
+
+    if ! getent passwd installer >/dev/null; then
+        useradd --uid 1000 --create-home --shell /bin/bash \
+            --comment 'proto Live User' installer
+    fi
+    usermod --append --groups wheel installer
+    passwd --delete installer
+
+    if [[ "${IMAGE_ID}" == proto-gnome ]]; then
+        install -d -m 0755 /etc/gdm
+        cat > /etc/gdm/custom.conf <<'EOF'
+[daemon]
+AutomaticLoginEnable=True
+AutomaticLogin=installer
+EOF
+        if [[ -f /etc/sysconfig/displaymanager ]]; then
+            sed -i \
+                -e 's/^DISPLAYMANAGER_AUTOLOGIN=.*/DISPLAYMANAGER_AUTOLOGIN="installer"/' \
+                -e 's/^DISPLAYMANAGER_PASSWORD_LESS_LOGIN=.*/DISPLAYMANAGER_PASSWORD_LESS_LOGIN="yes"/' \
+                /etc/sysconfig/displaymanager
+        fi
+
+        # A passwordless live account must never reach a lock screen it cannot
+        # unlock. These dconf defaults are live-only because the factory /etc
+        # snapshot was taken above.
+        install -d -m 0755 /etc/dconf/profile /etc/dconf/db/local.d/locks
+        cat > /etc/dconf/profile/user <<'EOF'
+user-db:user
+system-db:local
+EOF
+        cat > /etc/dconf/db/local.d/00-proto-live <<'EOF'
+[org/gnome/desktop/lockdown]
+disable-lock-screen=true
+
+[org/gnome/desktop/screensaver]
+lock-enabled=false
+
+[org/gnome/desktop/session]
+idle-delay=uint32 0
+EOF
+        cat > /etc/dconf/db/local.d/locks/00-proto-live <<'EOF'
+/org/gnome/desktop/lockdown/disable-lock-screen
+/org/gnome/desktop/screensaver/lock-enabled
+/org/gnome/desktop/session/idle-delay
+EOF
+        dconf update
+    else
+        install -d -m 0755 /etc/sddm.conf.d
+        cat > /etc/sddm.conf.d/10-proto-live.conf <<'EOF'
+[Autologin]
+User=installer
+Session=plasmawayland
+EOF
+
+    fi
+
+    install -d -m 0755 /etc/tmpfiles.d
+    cat > /etc/tmpfiles.d/proto-live.conf <<'EOF'
+d /home/installer 0755 installer users -
+d /home/installer/.config 0755 installer users -
+d /home/installer/.config/autostart 0755 installer users -
+d /home/installer/Desktop 0755 installer users -
+L+ /home/installer/.config/autostart/org.opensuse.ProtoInstaller.desktop - - - - /usr/share/applications/org.opensuse.ProtoInstaller.desktop
+L+ /home/installer/Desktop/Install\x20proto.desktop - - - - /usr/share/applications/org.opensuse.ProtoInstaller.desktop
+EOF
+
+    # CopyFiles may run in an unprivileged user namespace and cannot reliably
+    # retain a uid that only exists in the image. Complete and fix ownership of
+    # the live home at boot, after the mutable @root has been mounted. -n
+    # preserves anything that may already exist in the reusable live home.
+    cat > /etc/systemd/system/proto-live-home.service <<'EOF'
+[Unit]
+Description=Populate the proto live user home
+ConditionPathExists=/etc/proto-live
+After=local-fs.target systemd-tmpfiles-setup.service
+Before=display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/install -d -o installer -g users -m 0755 /home/installer
+ExecStart=/usr/bin/cp -a -n /etc/skel/. /home/installer/
+ExecStart=/usr/bin/chown -R installer:users /home/installer
+RemainAfterExit=yes
+
+[Install]
+WantedBy=graphical.target
+EOF
+    systemctl enable proto-live-home.service
+
+    install -d -m 0755 /etc/polkit-1/rules.d
+    cat > /etc/polkit-1/rules.d/51-run0-nopasswd.rules <<'EOF'
+polkit._run0_nopasswd.push("installer");
+EOF
+    : > /etc/proto-live
+fi
+
+
+# Generate AppStream metadata for this image.
+cp "${CHROOT_SRCDIR}/io.github.TobiPeterG.Proto.KDE.metainfo.xml" "${CHROOT_OUTPUTDIR}/io.github.TobiPeterG.Proto.KDE.metainfo.xml"

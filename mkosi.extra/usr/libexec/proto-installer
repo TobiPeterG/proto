@@ -1,0 +1,201 @@
+#!/bin/bash
+set -euo pipefail
+
+# Filesystem helpers such as mkfs.btrfs and mkfs.vfat live in /usr/sbin on
+# openSUSE. Do not depend on the desktop session or privilege broker retaining
+# an administrator's PATH.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+
+readonly self=/usr/libexec/proto-installer
+readonly definitions=/usr/lib/proto/installer-repart.d
+readonly deployment_info=/usr/lib/proto/deployment.env
+
+die() {
+    printf 'Error: %s\n' "$*" >&2
+    exit 1
+}
+
+root_source() {
+    local source
+    source=$(findmnt -nro SOURCE /) || return 1
+    source=${source%%\[*}
+    readlink -f -- "${source}"
+}
+
+source_disk() {
+    local source parent
+    source=$(root_source) || return 1
+    parent=$(lsblk -ndo PKNAME -- "${source}" 2>/dev/null || true)
+    if [[ -n "${parent}" ]]; then
+        readlink -f -- "/dev/${parent}"
+    else
+        printf '%s\n' "${source}"
+    fi
+}
+
+validate_target() {
+    local target=$1 source node
+
+    [[ -b "${target}" ]] || die "${target} is not a block device"
+    [[ $(lsblk -dnro TYPE -- "${target}") == disk ]] || \
+        die "${target} is not a whole disk"
+    [[ $(lsblk -dnro RO -- "${target}") == 0 ]] || \
+        die "${target} is read-only"
+
+    source=$(root_source) || die 'cannot determine the live root device'
+    while read -r node; do
+        [[ $(readlink -f -- "${node}") != "${target}" ]] || \
+            die 'refusing to overwrite the live USB'
+    done < <(lsblk -snro PATH -- "${source}")
+}
+
+validate_source_esp() {
+    # Accessing /efi activates systemd-gpt-auto-generator's automount in the
+    # normal live system. Refuse to erase the target if the bootloader payload
+    # is not actually available for CopyFiles=.
+    [[ -f /efi/EFI/BOOT/BOOTX64.EFI ]] || \
+        die 'the live EFI system partition is not mounted or has no fallback bootloader'
+    [[ -d /efi/EFI/Linux ]] || \
+        die 'the live EFI system partition contains no UKI directory'
+}
+
+relabel_target() {
+    local target=$1 root_partition target_root contexts policy selinux_type status=0
+
+    [[ -r "${deployment_info}" ]] || die 'deployment metadata is missing'
+    # The file is generated at image build time and contains shell-safe IDs.
+    # shellcheck disable=SC1090
+    source "${deployment_info}"
+    : "${ETC_SUBVOLUME:?deployment metadata has no ETC_SUBVOLUME}"
+
+    root_partition=$(lsblk -nrpo PATH,FSTYPE -- "${target}" | \
+        awk '$2 == "btrfs" { print $1; exit }')
+    [[ -b "${root_partition}" ]] || die 'cannot find the installed Btrfs partition'
+
+    selinux_type=$(sed -n 's/^SELINUXTYPE=//p' /etc/selinux/config | tail -n1)
+    selinux_type=${selinux_type:-targeted}
+    contexts="/etc/selinux/${selinux_type}/contexts/files/file_contexts"
+    policy=$(find "/etc/selinux/${selinux_type}/policy" \
+        -maxdepth 1 -type f -name 'policy.*' -print | sort -V | tail -n1)
+    [[ -f "${contexts}" && -n "${policy}" && -f "${policy}" ]] || \
+        die 'the SELinux policy required to label the installation is missing'
+
+    target_root=$(mktemp -d --tmpdir proto-target.XXXXXX)
+    mount -o subvol=/@root "${root_partition}" "${target_root}" || status=$?
+    if (( status == 0 )); then
+        mount -o "subvol=/${ETC_SUBVOLUME}" \
+            "${root_partition}" "${target_root}/etc" || status=$?
+    fi
+    if (( status == 0 )); then
+        setfiles -mF -c "${policy}" -r "${target_root}" \
+            "${contexts}" "${target_root}" || status=$?
+    fi
+
+    # Recursive unmount also handles a partially mounted target after errors.
+    umount -R "${target_root}" 2>/dev/null || true
+    rmdir "${target_root}" 2>/dev/null || true
+    (( status == 0 )) || die 'failed to apply SELinux labels to the installation'
+}
+
+install_disk() {
+    [[ ${EUID} -eq 0 ]] || die 'the installation backend must run as root'
+    [[ -e /etc/proto-live ]] || die 'installation is only allowed from live media'
+    [[ $# -eq 1 ]] || die 'expected exactly one target disk'
+    [[ -d "${definitions}" ]] || die 'installer partition definitions are missing'
+
+    local target
+    target=$(readlink -f -- "$1")
+    validate_target "${target}"
+    validate_source_esp
+
+    printf '# Erasing and partitioning %s…\n' "${target}"
+    systemd-repart \
+        --definitions="${definitions}" \
+        --copy-source=/ \
+        --empty=force \
+        --seed=random \
+        --dry-run=no \
+        --pretty=no \
+        "${target}"
+    printf '# Applying SELinux labels…\n'
+    relabel_target "${target}"
+    sync
+    printf '# Installation complete\n'
+}
+
+human_size() {
+    numfmt --to=iec-i --suffix=B "$1"
+}
+
+show_installer() {
+    [[ -e /etc/proto-live ]] || die 'this system is not running as live media'
+    command -v zenity >/dev/null || die 'zenity is not installed'
+
+    local live_disk path type bytes ro removable model selected log status
+    local -a rows=()
+    live_disk=$(source_disk) || die 'cannot determine the live USB'
+
+    while read -r path type bytes ro removable model; do
+        [[ "${type}" == disk && "${ro}" == 0 ]] || continue
+        path=$(readlink -f -- "${path}")
+        [[ "${path}" != "${live_disk}" ]] || continue
+        rows+=(FALSE "${path}" "$(human_size "${bytes}")" "${model:-Unknown disk}")
+    done < <(lsblk -dnbpro PATH,TYPE,SIZE,RO,RM,MODEL)
+
+    if (( ${#rows[@]} == 0 )); then
+        zenity --error --title='Install proto' \
+            --text='No writable target disk was found.'
+        exit 1
+    fi
+
+    selected=$(zenity --list --radiolist \
+        --title='Install proto' \
+        --text='Select the disk on which proto will be installed.' \
+        --column='' --column='Device' --column='Size' --column='Model' \
+        --print-column=2 --width=700 --height=420 \
+        "${rows[@]}") || exit 0
+    [[ -n "${selected}" ]] || exit 0
+
+    zenity --question --title='Erase disk and install?' \
+        --ok-label='Erase and Install' --cancel-label='Cancel' \
+        --text="All partitions and data on ${selected} will be permanently erased. Continue?" || exit 0
+
+    log=$(mktemp --tmpdir proto-installer.XXXXXX.log)
+    trap 'rm -f -- "${log}"' EXIT
+    set +e
+    pkexec "${self}" --install "${selected}" 2>&1 | \
+        tee "${log}" | \
+        zenity --progress --pulsate --auto-close --no-cancel \
+            --title='Installing proto' \
+            --text='Preparing the target disk…'
+    status=${PIPESTATUS[0]}
+    set -e
+
+    if (( status != 0 )); then
+        zenity --error --title='Installation failed' \
+            --text="$(tail -n 20 "${log}")"
+        exit "${status}"
+    fi
+
+    if zenity --question --title='Installation complete' \
+        --ok-label='Restart' --cancel-label='Continue Using Live System' \
+        --text='proto was installed successfully. Restart now?'; then
+        systemctl reboot
+    fi
+}
+
+case "${1:-}" in
+    --install)
+        shift
+        install_disk "$@"
+        ;;
+    --help|-h)
+        printf 'Usage: %s [--install DEVICE]\n' "${0##*/}"
+        ;;
+    '')
+        show_installer
+        ;;
+    *)
+        die "unknown option: $1"
+        ;;
+esac

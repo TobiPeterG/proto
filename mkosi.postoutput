@@ -1,0 +1,7 @@
+#!/usr/bin/bash
+set -euo pipefail
+
+input="$OUTPUTDIR/${IMAGE_ID}-${IMAGE_VERSION}.${ARCHITECTURE}.usr.erofs"
+
+desync make --chunk-size 1024:2048:4096 "$OUTPUTDIR/${IMAGE_ID}-${IMAGE_VERSION}.${ARCHITECTURE}.usr.erofs.caibx" "$input"
+    

@@ -1,0 +1,179 @@
+#!/usr/bin/python3
+"""Maintain deployment-specific /etc trees from /usr/share/factory/etc."""
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import stat
+import subprocess
+import sys
+
+
+METADATA = ".proto-etc-factory.json"
+VERSION = 1
+NEVER = {
+    ".pwd.lock", "crypttab", "fstab", "group", "group-", "gshadow",
+    "gshadow-", "hostname", "hosts", "locale.conf", "localtime",
+    "machine-id", "passwd", "passwd-", "shadow", "shadow-", "subgid",
+    "subgid-", "subuid", "subuid-", "vconsole.conf",
+}
+
+
+def excluded(relative: str) -> bool:
+    return relative == METADATA or Path(relative).name in NEVER
+
+
+def fingerprint(path: Path):
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(info.st_mode):
+        return {"kind": "link", "target": os.readlink(path)}
+    if stat.S_ISREG(info.st_mode):
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+        return {"kind": "file", "sha256": digest.hexdigest()}
+    return None
+
+
+def entries(root: Path, include_never: bool = False):
+    result = {}
+    if not root.is_dir():
+        return result
+    for directory, names, files in os.walk(root, followlinks=False):
+        base = Path(directory)
+        # os.walk puts symlinked directories in names. Treat them as links and
+        # never traverse them.
+        for name in list(names):
+            path = base / name
+            if path.is_symlink():
+                files.append(name)
+                names.remove(name)
+        for name in files:
+            path = base / name
+            relative = path.relative_to(root).as_posix()
+            if not include_never and excluded(relative):
+                continue
+            value = fingerprint(path)
+            if value is not None:
+                result[relative] = value
+    return result
+
+
+def load_metadata(etc: Path, old_factory: Path | None):
+    path = etc / METADATA
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("version") != VERSION or not isinstance(data.get("entries"), dict):
+            raise ValueError("unsupported metadata format")
+        return data["entries"]
+    except FileNotFoundError:
+        if old_factory is None:
+            return {}
+        return entries(old_factory)
+
+
+def write_metadata(root: Path, managed):
+    temporary = root / f"{METADATA}.new"
+    temporary.write_text(
+        json.dumps({"version": VERSION, "entries": managed}, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, root / METADATA)
+
+
+def remove(path: Path):
+    try:
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def copy(source: Path, target: Path):
+    target.parent.mkdir(parents=True, exist_ok=True)
+    remove(target)
+    # cp -a retains ownership, modes, ACLs and xattrs. SELinux is relabelled
+    # for the target root by the deployment helper afterwards.
+    subprocess.run(["cp", "-a", "--", str(source), str(target)], check=True)
+
+
+def merge(etc: Path, factory: Path, old_factory: Path | None):
+    old = load_metadata(etc, old_factory)
+    new = entries(factory)
+
+    for relative, new_value in new.items():
+        target = etc / relative
+        old_value = old.get(relative)
+        current = fingerprint(target)
+        if old_value is None:
+            if not os.path.lexists(target):
+                copy(factory / relative, target)
+        elif current == old_value and current != new_value:
+            copy(factory / relative, target)
+
+    for relative, old_value in old.items():
+        if relative in new:
+            continue
+        target = etc / relative
+        if fingerprint(target) == old_value:
+            remove(target)
+
+    write_metadata(etc, new)
+
+
+def seed(factory: Path):
+    write_metadata(factory, entries(factory))
+
+
+def sync_late(baseline: Path, source: Path, target: Path):
+    before = entries(baseline, include_never=True)
+    now = entries(source, include_never=True)
+    for relative in sorted(set(before) | set(now)):
+        if relative == METADATA or before.get(relative) == now.get(relative):
+            continue
+        destination = target / relative
+        if relative not in now:
+            remove(destination)
+        else:
+            copy(source / relative, destination)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    commands = parser.add_subparsers(dest="command", required=True)
+    seed_parser = commands.add_parser("seed")
+    seed_parser.add_argument("factory", type=Path)
+    merge_parser = commands.add_parser("merge")
+    merge_parser.add_argument("--etc", required=True, type=Path)
+    merge_parser.add_argument("--factory", required=True, type=Path)
+    merge_parser.add_argument("--old-factory", type=Path)
+    sync_parser = commands.add_parser("sync-late")
+    sync_parser.add_argument("--baseline", required=True, type=Path)
+    sync_parser.add_argument("--source", required=True, type=Path)
+    sync_parser.add_argument("--target", required=True, type=Path)
+    args = parser.parse_args()
+
+    if args.command == "seed":
+        seed(args.factory)
+    elif args.command == "merge":
+        merge(args.etc, args.factory, args.old_factory)
+    else:
+        sync_late(args.baseline, args.source, args.target)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as error:
+        print(f"proto etc factory: {error}", file=sys.stderr)
+        raise

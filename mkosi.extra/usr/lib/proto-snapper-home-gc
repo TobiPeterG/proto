@@ -1,0 +1,63 @@
+#!/usr/bin/python3
+"""Remove stale Snapper bookkeeping after a home subvolume was removed.
+"""
+
+import os
+import re
+import sys
+from pathlib import Path
+
+CONFIGS = Path("/etc/snapper/configs")
+SYSCONFIG = Path("/etc/sysconfig/snapper")
+SUBVOLUME_RE = re.compile(r'^SUBVOLUME="(.*)"', re.MULTILINE)
+SNAPPER_CONFIGS_RE = re.compile(r'^SNAPPER_CONFIGS="([^"]*)"', re.MULTILINE)
+
+
+def is_subvolume(path: str) -> bool:
+    try:
+        return os.stat(path).st_ino == 256
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
+def prune_sysconfig(config: str) -> None:
+    if not SYSCONFIG.exists():
+        return
+    text = SYSCONFIG.read_text()
+    match = SNAPPER_CONFIGS_RE.search(text)
+    if match is None:
+        return
+    names = " ".join(name for name in match.group(1).split() if name != config)
+    updated = text[: match.start()] + f'SNAPPER_CONFIGS="{names}"' + text[match.end() :]
+    if updated == text:
+        return
+    temporary = SYSCONFIG.with_suffix(".proto-gc")
+    temporary.write_text(updated)
+    os.chmod(temporary, 0o644)
+    temporary.replace(SYSCONFIG)
+
+
+def main() -> int:
+    if not CONFIGS.is_dir():
+        return 0
+    for path in sorted(CONFIGS.glob("home_*")):
+        try:
+            matches = SUBVOLUME_RE.findall(path.read_text(errors="replace"))
+        except OSError as error:
+            print(f"Cannot read {path}: {error}", file=sys.stderr)
+            continue
+        if matches and not is_subvolume(matches[-1]):
+            print(f"Removing stale Snapper config {path.name}; {matches[-1]} is gone")
+            prune_sysconfig(path.name)
+            path.unlink(missing_ok=True)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except OSError as error:
+        print(error, file=sys.stderr)
+        sys.exit(1)

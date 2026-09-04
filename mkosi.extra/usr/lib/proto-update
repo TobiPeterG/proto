@@ -1,0 +1,292 @@
+#!/bin/bash
+set -euo pipefail
+
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+
+readonly state_dir=/var/lib/proto-update/pending
+readonly incoming=/var/lib/proto-update/incoming
+
+die() {
+    echo "proto update: $*" >&2
+    exit 1
+}
+
+cmdline_value() {
+    local key=$1 word
+    for word in $(</proc/cmdline); do
+        [[ ${word} == "${key}="* ]] || continue
+        printf '%s\n' "${word#*=}"
+        return 0
+    done
+    return 1
+}
+
+valid_deployment() {
+    [[ $1 =~ ^sys-(gnome|kde)-[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+}
+
+delete_subvolume() {
+    local path=$1
+    [[ -e ${path} ]] || return 0
+    btrfs subvolume show "${path}" >/dev/null 2>&1 || \
+        die "refusing to remove non-subvolume ${path}"
+    btrfs subvolume delete --commit-after "${path}"
+}
+
+factory_deployment() {
+    local root=$1 id version
+    id=$(sed -n 's/^IMAGE_ID=//p' "${root}/lib/proto/deployment.env" | tail -n1)
+    version=$(sed -n 's/^IMAGE_VERSION=//p' "${root}/lib/proto/deployment.env" | tail -n1)
+    [[ -n ${id} && -n ${version} ]] || return 1
+    printf '%s-%s\n' "${id}" "${version}"
+}
+
+relabel_etc() {
+    local target=$1 contexts policy
+    contexts=${target}/selinux/targeted/contexts/files/file_contexts
+    policy=$(find "${target}/selinux/targeted/policy" -maxdepth 1 \
+        -type f -name 'policy.*' -print | sort -V | tail -n1)
+    [[ -f ${contexts} && -n ${policy} && -f ${policy} ]] || \
+        die 'the prepared /etc has no usable SELinux policy'
+    setfiles -mF -c "${policy}" -r "${target}" "${contexts}" "${target}"
+}
+
+prepare() {
+    [[ ${EUID} -eq 0 ]] || die 'prepare must run as root'
+    [[ ! -e /etc/proto-live ]] || die 'updates cannot be prepared on live media'
+    [[ $# -eq 2 ]] || die 'prepare expects a UKI and an EROFS image'
+
+    local uki usr active work new_root old_root mounted_new=no mounted_old=no
+    local deployment artifact inspect etc_tmp baseline etc_final deployment_dir usr_tmp
+    local esp uki_dir uki_tmp uki_final state
+    local -a existing
+    uki=$(readlink -f -- "$1")
+    usr=$(readlink -f -- "$2")
+    [[ -f ${uki} && -f ${usr} ]] || die 'the UKI/EROFS input pair is incomplete'
+    active=$(cmdline_value system.deployment) || die 'the running UKI has no deployment ID'
+    valid_deployment "${active}" || die 'the running UKI has an invalid deployment ID'
+
+    work=$(mktemp -d --tmpdir proto-update.XXXXXX)
+    new_root=${work}/new
+    old_root=${work}/old
+    mkdir -p "${new_root}" "${old_root}"
+    cleanup_prepare() {
+        [[ ${mounted_old} == no ]] || umount "${old_root}" 2>/dev/null || true
+        [[ ${mounted_new} == no ]] || umount "${new_root}" 2>/dev/null || true
+        rmdir "${old_root}" "${new_root}" "${work}" 2>/dev/null || true
+    }
+    trap cleanup_prepare EXIT
+
+    mount -t erofs -o ro,loop "${usr}" "${new_root}"
+    mounted_new=yes
+    deployment=$(factory_deployment "${new_root}") || \
+        die 'the EROFS image has no deployment metadata'
+    valid_deployment "${deployment}" || die "invalid deployment ID ${deployment}"
+    [[ ${deployment} != "${active}" ]] || die 'refusing to redeploy the running version'
+    [[ -d ${new_root}/share/factory/etc ]] || die 'the EROFS image has no factory /etc'
+
+    artifact=${uki##*/}
+    artifact=${artifact%.pending}
+    artifact=${artifact%.efi}
+    [[ ${artifact} == "${deployment}."* ]] || \
+        die 'the UKI filename does not match the EROFS deployment'
+    inspect=$(bootctl kernel-inspect "${uki}" 2>/dev/null) || \
+        die 'the UKI cannot be inspected'
+    grep -Fq "system.deployment=${deployment}" <<<"${inspect}" || \
+        die 'the UKI command line does not match the EROFS deployment'
+
+    [[ -f /.system/@deployments/${active}.usr.erofs ]] || \
+        die 'the active EROFS image is missing'
+    mount -t erofs -o ro,loop \
+        "/.system/@deployments/${active}.usr.erofs" "${old_root}"
+    mounted_old=yes
+    [[ -d ${old_root}/share/factory/etc ]] || die 'the active image has no factory /etc'
+
+    etc_tmp=/.system/@etc-${deployment}.prepare
+    baseline=/.system/@etc-${deployment}.sync-base
+    etc_final=/.system/@etc-${deployment}
+
+    esp=$(bootctl --print-esp-path)
+    uki_dir=${esp}/EFI/Linux
+    uki_tmp=${uki_dir}/.${artifact}.efi.new
+    uki_final=${uki_dir}/${artifact}+3-0.efi
+    mkdir -p "${uki_dir}" "${state_dir}"
+    state=${state_dir}/${deployment}.env
+    shopt -s nullglob
+    existing=("${uki_dir}/${artifact}"+*-*.efi "${uki_dir}/${artifact}.efi")
+
+    # Recover only paths recorded by an interrupted preparation transaction.
+    # Once the counted UKI is visible, the transaction is committed and must
+    # be handled through boot counting or the explicit rollback command.
+    if [[ -f ${state} ]]; then
+        unset STATUS NEW_DEPLOYMENT
+        # shellcheck disable=SC1090
+        source "${state}"
+        if [[ ${STATUS:-} == preparing && ${NEW_DEPLOYMENT:-} == "${deployment}" && \
+              ${#existing[@]} -eq 0 ]]; then
+            delete_subvolume "${etc_tmp}"
+            delete_subvolume "${baseline}"
+            delete_subvolume "${etc_final}"
+            rm -f -- "/.system/@deployments/${deployment}.usr.erofs" \
+                "/.system/@deployments/${deployment}.usr.erofs.new" \
+                "${uki_tmp}" "${state}"
+        else
+            die "deployment ${deployment} already has an update transaction"
+        fi
+    fi
+    (( ${#existing[@]} == 0 )) || die "a UKI for ${deployment} already exists"
+    [[ ! -e ${etc_tmp} && ! -e ${baseline} && ! -e ${etc_final} ]] || \
+        die "deployment ${deployment} already has /etc state"
+
+    {
+        printf 'STATUS=preparing\n'
+        printf 'ACTIVE_DEPLOYMENT=%q\n' "${active}"
+        printf 'NEW_DEPLOYMENT=%q\n' "${deployment}"
+        printf 'BASELINE=%q\n' "${baseline}"
+        printf 'TARGET_ETC=%q\n' "${etc_final}"
+        printf 'UKI_ARTIFACT=%q\n' "${artifact}"
+    } > "${state}.new"
+    chmod 0600 "${state}.new"
+    mv "${state}.new" "${state}"
+    sync -f "${state_dir}"
+
+    btrfs subvolume snapshot -r /etc "${baseline}"
+    btrfs subvolume snapshot /etc "${etc_tmp}"
+    /usr/lib/proto-etc-factory merge \
+        --etc "${etc_tmp}" \
+        --factory "${new_root}/share/factory/etc" \
+        --old-factory "${old_root}/share/factory/etc"
+    relabel_etc "${etc_tmp}"
+
+    deployment_path=/.system/@deployments/${deployment}
+    usr_tmp=${deployment_path}.usr.erofs.new
+    cp --reflink=auto --sparse=always -- "${usr}" "${usr_tmp}"
+    chmod 0644 "${usr_tmp}"
+    sync -f "${usr_tmp}"
+    mv "${usr_tmp}" "${deployment_path}.usr.erofs"
+    mv "${etc_tmp}" "${etc_final}"
+
+    install -m 0644 -- "${uki}" "${uki_tmp}"
+    sync -f "${uki_tmp}"
+
+    {
+        printf 'STATUS=prepared\n'
+        printf 'ACTIVE_DEPLOYMENT=%q\n' "${active}"
+        printf 'NEW_DEPLOYMENT=%q\n' "${deployment}"
+        printf 'BASELINE=%q\n' "${baseline}"
+        printf 'TARGET_ETC=%q\n' "${etc_final}"
+        printf 'UKI_ARTIFACT=%q\n' "${artifact}"
+    } > "${state}.new"
+    chmod 0600 "${state}.new"
+    mv "${state}.new" "${state}"
+    sync -f "${state_dir}"
+
+    mv "${uki_tmp}" "${uki_final}"
+    sync -f "${uki_dir}"
+    cleanup_prepare
+    trap - EXIT
+    echo "Prepared ${deployment} as ${uki_final}"
+}
+
+prepare_incoming() {
+    [[ ${EUID} -eq 0 ]] || die 'prepare-incoming must run as root'
+    mkdir -p "${incoming}"
+    shopt -s nullglob
+    local uki stem usr
+    for uki in "${incoming}"/*.efi; do
+        stem=${uki%.efi}
+        usr=${stem}.usr.erofs
+        [[ -f ${usr} ]] || continue
+        prepare "${uki}" "${usr}"
+        rm -f -- "${uki}" "${usr}"
+    done
+}
+
+sync_pending() {
+    [[ ${EUID} -eq 0 ]] || die 'sync-pending must run as root'
+    local active state tries entry esp
+    active=$(cmdline_value system.deployment) || return 0
+    esp=$(bootctl --print-esp-path) || return 0
+    shopt -s nullglob
+    for state in "${state_dir}"/*.env; do
+        unset ACTIVE_DEPLOYMENT NEW_DEPLOYMENT BASELINE TARGET_ETC UKI_ARTIFACT
+        # shellcheck disable=SC1090
+        source "${state}"
+        if [[ ${NEW_DEPLOYMENT:-} == "${active}" ]]; then
+            [[ -z ${BASELINE:-} ]] || delete_subvolume "${BASELINE}"
+            rm -f -- "${state}"
+            continue
+        fi
+        [[ ${ACTIVE_DEPLOYMENT:-} == "${active}" ]] || continue
+        [[ -d ${BASELINE:-} && -d ${TARGET_ETC:-} ]] || continue
+
+        # Do not keep forwarding configuration into an exhausted deployment.
+        tries=no
+        for entry in "${esp}/EFI/Linux/${UKI_ARTIFACT}"+*-*.efi; do
+            [[ -e ${entry} ]] || continue
+            [[ ${entry##*/} =~ \+([1-9][0-9]*)-[0-9]+\.efi$ ]] && tries=yes
+        done
+        if [[ ${tries} == no ]]; then
+            delete_subvolume "${BASELINE}"
+            rm -f -- "${state}"
+            continue
+        fi
+
+        /usr/lib/proto-etc-factory sync-late \
+            --baseline "${BASELINE}" --source /etc --target "${TARGET_ETC}"
+        relabel_etc "${TARGET_ETC}"
+        delete_subvolume "${BASELINE}"
+        # Keep the sync point until the new deployment actually boots
+        btrfs subvolume snapshot -r /etc "${BASELINE}"
+        sync -f "${state_dir}"
+    done
+}
+
+rollback() {
+    [[ ${EUID} -eq 0 ]] || die 'rollback must run as root'
+    [[ $# -eq 1 ]] || die 'rollback expects a deployment ID'
+    valid_deployment "$1" || die 'invalid deployment ID'
+    local state artifact esp entry found=no
+    state=${state_dir}/$1.env
+    [[ -f ${state} ]] || die "deployment $1 is not pending"
+    # shellcheck disable=SC1090
+    source "${state}"
+    esp=$(bootctl --print-esp-path)
+    shopt -s nullglob
+    for entry in "${esp}/EFI/Linux/${UKI_ARTIFACT}"+*-*.efi \
+                 "${esp}/EFI/Linux/${UKI_ARTIFACT}.efi"; do
+        [[ -e ${entry} ]] || continue
+        mv "${entry}" "${entry}.disabled"
+        found=yes
+    done
+    [[ ${found} == yes ]] || die 'the pending UKI was not found'
+    [[ -z ${BASELINE:-} ]] || delete_subvolume "${BASELINE}"
+    rm -f -- "${state}"
+    sync -f "${esp}/EFI/Linux"
+    echo "Disabled $1; its EROFS and /etc are retained for inspection"
+}
+
+case "${1:-}" in
+    prepare)
+        shift
+        prepare "$@"
+        ;;
+    prepare-incoming)
+        shift
+        [[ $# -eq 0 ]] || die 'prepare-incoming takes no arguments'
+        prepare_incoming
+        ;;
+    sync-pending)
+        shift
+        [[ $# -eq 0 ]] || die 'sync-pending takes no arguments'
+        sync_pending
+        ;;
+    rollback)
+        shift
+        rollback "$@"
+        ;;
+    *)
+        echo 'Usage: proto-update {prepare UKI USR-EROFS|prepare-incoming|sync-pending|rollback DEPLOYMENT}' >&2
+        exit 2
+        ;;
+esac
