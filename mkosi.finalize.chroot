@@ -230,4 +230,17 @@ fi
 
 
 # Generate AppStream metadata for this image.
-cp "${CHROOT_SRCDIR}/io.github.TobiPeterG.Proto.KDE.metainfo.xml" "${CHROOT_OUTPUTDIR}/io.github.TobiPeterG.Proto.KDE.metainfo.xml"
+source_dir=
+for candidate in "${CHROOT_SRCDIR:?}" /usr/src/packages/SOURCES/*; do
+    if [[ -f ${candidate}/io.github.TobiPeterG.Proto.KDE.metainfo.xml ]]; then
+        source_dir=${candidate}
+        break
+    fi
+done
+[[ -n ${source_dir} ]] || {
+    echo "AppStream metadata source file not found" >&2
+    exit 1
+}
+
+cp "${source_dir}/io.github.TobiPeterG.Proto.KDE.metainfo.xml" \
+    "${CHROOT_OUTPUTDIR}/io.github.TobiPeterG.Proto.KDE.metainfo.xml"
