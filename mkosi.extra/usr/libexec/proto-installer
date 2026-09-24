@@ -49,14 +49,16 @@ validate_target() {
     done < <(lsblk -snro PATH -- "${source}")
 }
 
-validate_source_esp() {
-    # Accessing /efi activates systemd-gpt-auto-generator's automount in the
-    # normal live system. Refuse to erase the target if the bootloader payload
-    # is not actually available for CopyFiles=.
-    [[ -f /efi/EFI/BOOT/BOOTX64.EFI ]] || \
-        die 'the live EFI system partition is not mounted or has no fallback bootloader'
-    [[ -d /efi/EFI/Linux ]] || \
-        die 'the live EFI system partition contains no UKI directory'
+validate_source_boot() {
+    # $BOOT may be a combined ESP or a separate XBOOTLDR partition. Accessing
+    # both paths activates the corresponding automounts when they exist.
+    if [[ ! -f /efi/EFI/BOOT/BOOTX64.EFI && \
+          ! -f /boot/EFI/BOOT/BOOTX64.EFI ]]; then
+        die 'the live boot partition is not mounted or has no fallback bootloader'
+    fi
+    if [[ ! -d /boot/EFI/Linux && ! -d /efi/EFI/Linux ]]; then
+        die 'the live boot partition contains no UKI directory'
+    fi
 }
 
 relabel_target() {
@@ -106,7 +108,7 @@ install_disk() {
     local target
     target=$(readlink -f -- "$1")
     validate_target "${target}"
-    validate_source_esp
+    validate_source_boot
 
     printf '# Erasing and partitioning %s…\n' "${target}"
     systemd-repart \

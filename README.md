@@ -6,9 +6,9 @@ updated atomically through a native A/B partition layout.
 
 ## Disk layout
 
-Each image contains six GPT partitions:
+A newly created image normally contains six GPT partitions:
 
-1. a 4 GiB EFI System Partition containing systemd-boot and versioned UKIs;
+1. a 2–4 GiB EFI System Partition containing systemd-boot and versioned UKIs;
 2. an 8 GiB EROFS `/usr` partition;
 3. a 128 MiB dm-verity hash partition for that `/usr` slot;
 4. an empty 8 GiB `/usr` update slot;
@@ -19,6 +19,13 @@ The first `/usr`/Verity pair is populated during the image build. The second
 pair uses `Format=empty`, making it available to `systemd-sysupdate`. Both
 system slots have fixed sizes; only the final Btrfs partition grows when the
 image is written to a larger disk.
+
+The ESP definition permits sizes from 100 MiB to 4 GiB. A 2–4 GiB XBOOTLDR
+definition uses `SupplementFor=00-esp`, so systemd-repart normally merges its
+size and `/boot` contents into one 4 GiB ESP. If an existing ESP cannot be
+grown sufficiently, repart falls back to keeping the smaller ESP and creating
+a separate XBOOTLDR of at least 2 GiB. On 4 KiB-sector disks, systemd-repart
+automatically raises the ESP minimum from 100 MiB to 260 MiB.
 
 The Btrfs partition remains the root partition and has this subvolume layout:
 
@@ -75,13 +82,19 @@ Each desktop produces:
 - an XZ-compressed complete disk image;
 - an unsigned or OBS-signed UKI, depending on the build environment;
 - compressed split `/usr` and usr-verity partition artifacts;
-- a `.caibx` index for chunk-based reconstruction of the `/usr` artifact;
 - a Verity root-hash artifact, checksums and a package manifest.
 
+For OBS builds, the first stage compresses the split `/usr` and usr-verity
+artifacts with XZ and removes their raw copies. The complete disk crosses into
+the second signing stage temporarily compressed with Zstd, which mkosi-obs can
+modify natively; only the UKI remains uncompressed. After signatures have been
+attached, the disk is converted directly from Zstd to XZ. Published disk and
+partition images are therefore XZ-only without an oversized OBS disk request.
+
 The complete uncompressed disk is sparse but has a nominal minimum size of
-roughly 28.25 GiB: 4 GiB ESP, two 8 GiB `/usr` slots, two 128 MiB Verity slots
-and at least 8 GiB Btrfs state. A practical installation target should be
-larger than 29 GiB.
+roughly 26.25 GiB with a 2 GiB `$BOOT`: two 8 GiB `/usr` slots, two 128 MiB
+Verity slots and at least 8 GiB Btrfs state. With a 4 GiB `$BOOT` it is roughly
+28.25 GiB. A practical target is a 32 GB device or larger.
 
 ## Installation
 
@@ -129,11 +142,6 @@ It compares `/usr/share/factory/etc` with the hashes stored in persistent
 and untracked files are preserved. Switching back to an older slot applies the
 same merge in the reverse direction.
 
-Current `systemd-sysupdate` regular-file transfers do not consume binary
-deltas. The build therefore also publishes a desync `.caibx` index; a download
-proxy such as `kde-linux-sysupdated` can reconstruct the new fixed-size EROFS
-partition from locally available and downloaded chunks.
-
 ## Factory reset
 
 The **Factory Reset** launcher requests systemd's firmware-assisted factory
@@ -143,7 +151,7 @@ partitions by their hash-derived UUIDs, opens them through dm-verity, and only
 then recreates `@root` and `@etc` from the authenticated factory tree.
 
 The operation deletes users, homes, Flatpaks, containers, logs and other
-mutable data. It does not modify the ESP or either A/B system slot.
+mutable data. It does not modify `$BOOT` or either A/B system slot.
 
 ## Package and state policy
 

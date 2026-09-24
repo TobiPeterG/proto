@@ -44,17 +44,8 @@ if (( ${#verities[@]} != 1 )); then
     exit 1
 fi
 
-desync make --chunk-size 1024:2048:4096 "${usrs[0]}.caibx" "${usrs[0]}"
-
-if [[ ${obs_build} == false ]]; then
-    (
-        cd "$OUTPUTDIR"
-        sha256sum "$(basename "${usrs[0]}.caibx")" > "$(basename "${usrs[0]}.caibx").sha256"
-    )
-fi
-
 for artifact in "${usrs[0]}" "${verities[0]}"; do
-    xz --threads=0 --keep --force "${artifact}"
+    xz --threads=0 --force "${artifact}"
     if [[ ${obs_build} == false ]]; then
         (
             cd "$OUTPUTDIR"
@@ -63,11 +54,6 @@ for artifact in "${usrs[0]}" "${verities[0]}"; do
     fi
 done
 
-# The OBS attachment stage reconstructs these split files from the signed disk.
-if [[ ${obs_build} == true ]]; then
-    rm -f -- "${usrs[0]}" "${verities[0]}"
-fi
-
 disk="$OUTPUTDIR/${IMAGE_ID}_${IMAGE_VERSION}_${ARCHITECTURE}.raw"
 [[ -f ${disk} ]] || {
     printf 'Expected complete raw disk image not found: %s\n' "$disk" >&2
@@ -75,6 +61,9 @@ disk="$OUTPUTDIR/${IMAGE_ID}_${IMAGE_VERSION}_${ARCHITECTURE}.raw"
 }
 
 if [[ ${obs_build} == true ]]; then
+    # mkosi-obs supports Zstd-compressed disk images. Compress the temporary
+    # handoff so OBS does not copy the large raw disk into its signing sandbox.
+    zstd --threads=0 --force --rm "${disk}"
     recipe=${OUTPUTDIR}/mkosi.conf
     [[ -f ${recipe} ]] || {
         echo "mkosi-obs did not create its second-stage recipe" >&2
@@ -87,7 +76,7 @@ if [[ ${obs_build} == true ]]; then
 BuildScripts=%D/mkosi.final-output
 EOF
 else
-    xz --threads=0 --keep --force "$disk"
+    xz --threads=0 --force "$disk"
     (
         cd "$OUTPUTDIR"
         sha256sum "$(basename "${disk}.xz")" > "$(basename "${disk}.xz").sha256"

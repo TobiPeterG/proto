@@ -13,6 +13,6 @@ zenity --question --title="${title}" \
     --width=520 \
     --ok-label='Reset and restart' \
     --cancel-label='Cancel' \
-    --text='<b>Delete all users, settings, applications, containers and other mutable data?</b>\n\nThe ESP and both read-only A/B system slots are retained. This cannot be undone.' || exit 0
+    --text='<b>Delete all users, settings, applications, containers and other mutable data?</b>\n\nThe boot partition and both read-only A/B system slots are retained. This cannot be undone.' || exit 0
 
 pkexec /usr/bin/systemctl start factory-reset.target

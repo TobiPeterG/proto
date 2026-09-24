@@ -16,7 +16,7 @@ SPDX-License-Identifier: CC0-1.0
     <ul>
       <li>Read-only EROFS system image for /usr</li>
       <li>Versioned system deployments with atomic system updates</li>
-      <li>Delta updates using systemd-sysupdate and desync</li>
+      <li>Verified A/B updates using systemd-sysupdate and dm-verity</li>
       <li>Btrfs-backed mutable system and user state</li>
       <li>Flatpak support for desktop applications</li>
     </ul>

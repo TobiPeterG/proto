@@ -108,7 +108,7 @@ done
 btrfs subvolume create "${top}/@root.factory-new"
 btrfs subvolume create "${top}/@etc.factory-new"
 install -d -m 0755 \
-    "${top}/@root.factory-new"/{dev,efi,etc,home,media,mnt,opt,proc,root,run,srv,.system,sys,tmp,usr,var}
+    "${top}/@root.factory-new"/{boot,dev,efi,etc,home,media,mnt,opt,proc,root,run,srv,.system,sys,tmp,usr,var}
 cp -a "${image_root}/lib/proto/installer-root-skeleton/." \
     "${top}/@root.factory-new/"
 cp -a "${image_root}/share/factory/etc/." "${top}/@etc.factory-new/"
@@ -135,7 +135,7 @@ sync -f "${top}"
 delete_subvolume "${top}/@root.factory-old"
 delete_subvolume "${top}/@etc.factory-old"
 # Clean up subvolumes left by pre-A/B installations after the replacement is
-# committed. The ESP and both physical /usr slot pairs are never modified.
+# committed. The boot partitions and both physical /usr slot pairs are untouched.
 delete_subvolume "${top}/@home"
 delete_subvolume "${top}/@var"
 delete_subvolume "${top}/@deployments"
