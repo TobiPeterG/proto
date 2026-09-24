@@ -50,8 +50,8 @@ validate_target() {
 }
 
 validate_source_boot() {
-    # $BOOT may be a combined ESP or a separate XBOOTLDR partition. Accessing
-    # both paths activates the corresponding automounts when they exist.
+    # The ESP may be mounted at /efi or /boot. Accessing both paths activates
+    # the corresponding automount when it exists.
     if [[ ! -f /efi/EFI/BOOT/BOOTX64.EFI && \
           ! -f /boot/EFI/BOOT/BOOTX64.EFI ]]; then
         die 'the live boot partition is not mounted or has no fallback bootloader'

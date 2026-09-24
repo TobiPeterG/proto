@@ -135,7 +135,7 @@ sync -f "${top}"
 delete_subvolume "${top}/@root.factory-old"
 delete_subvolume "${top}/@etc.factory-old"
 # Clean up subvolumes left by pre-A/B installations after the replacement is
-# committed. The boot partitions and both physical /usr slot pairs are untouched.
+# committed. The ESP and both physical /usr slot pairs are untouched.
 delete_subvolume "${top}/@home"
 delete_subvolume "${top}/@var"
 delete_subvolume "${top}/@deployments"

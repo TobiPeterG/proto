@@ -8,7 +8,7 @@ updated atomically through a native A/B partition layout.
 
 A newly created image normally contains six GPT partitions:
 
-1. a 2–4 GiB EFI System Partition containing systemd-boot and versioned UKIs;
+1. a 4 GiB EFI System Partition containing systemd-boot and versioned UKIs;
 2. an 8 GiB EROFS `/usr` partition;
 3. a 128 MiB dm-verity hash partition for that `/usr` slot;
 4. an empty 8 GiB `/usr` update slot;
@@ -20,12 +20,10 @@ pair uses `Format=empty`, making it available to `systemd-sysupdate`. Both
 system slots have fixed sizes; only the final Btrfs partition grows when the
 image is written to a larger disk.
 
-The ESP definition permits sizes from 100 MiB to 4 GiB. A 2–4 GiB XBOOTLDR
-definition uses `SupplementFor=00-esp`, so systemd-repart normally merges its
-size and `/boot` contents into one 4 GiB ESP. If an existing ESP cannot be
-grown sufficiently, repart falls back to keeping the smaller ESP and creating
-a separate XBOOTLDR of at least 2 GiB. On 4 KiB-sector disks, systemd-repart
-automatically raises the ESP minimum from 100 MiB to 260 MiB.
+The ESP has a fixed size of 4 GiB and contains both the systemd-boot files from
+`/efi` and the UKIs from `/boot`. Keeping these in one partition matches the
+OBS signing integration, which extracts and reinstalls signed EFI binaries in
+the ESP, and avoids the systemd-repart `SupplementFor=` merge path.
 
 The Btrfs partition remains the root partition and has this subvolume layout:
 
@@ -92,9 +90,9 @@ attached, the disk is converted directly from Zstd to XZ. Published disk and
 partition images are therefore XZ-only without an oversized OBS disk request.
 
 The complete uncompressed disk is sparse but has a nominal minimum size of
-roughly 26.25 GiB with a 2 GiB `$BOOT`: two 8 GiB `/usr` slots, two 128 MiB
-Verity slots and at least 8 GiB Btrfs state. With a 4 GiB `$BOOT` it is roughly
-28.25 GiB. A practical target is a 32 GB device or larger.
+roughly 28.25 GiB: a 4 GiB ESP, two 8 GiB `/usr` slots, two 128 MiB Verity
+slots and at least 8 GiB Btrfs state. A practical target is a 32 GB device or
+larger.
 
 ## Installation
 
