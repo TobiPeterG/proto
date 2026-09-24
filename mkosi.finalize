@@ -22,3 +22,11 @@ install -d -m 0755 "${root}/usr/lib/systemd"
 base64 -d "${source_dir}/mkosi.keys/obs-project.pgp.b64" \
     > "${root}/usr/lib/systemd/import-pubring.pgp"
 chmod 0644 "${root}/usr/lib/systemd/import-pubring.pgp"
+
+metainfo=${source_dir}/io.github.TobiPeterG.Proto.KDE.metainfo.xml
+[[ -f ${metainfo} ]] || {
+    echo "AppStream metadata source file not found: ${metainfo}" >&2
+    exit 1
+}
+install -m 0644 "${metainfo}" \
+    "${OUTPUTDIR:?}/io.github.TobiPeterG.Proto.KDE.metainfo.xml"
