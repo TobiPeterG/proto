@@ -2,11 +2,6 @@
 set -euo pipefail
 
 : "${IMAGE_ID:?mkosi did not export IMAGE_ID}"
-: "${IMAGE_VERSION:?mkosi did not export IMAGE_VERSION}"
-: "${ARCHITECTURE:?mkosi did not export ARCHITECTURE}"
-
-deployment="/@deployments/${IMAGE_ID}-${IMAGE_VERSION}.${ARCHITECTURE}.usr.erofs"
-install -d /@deployments
 
 # systemd-boot derives an automatic UKI entry title from PRETTY_NAME in the
 # embedded os-release section. Keep the distribution ID intact for package and
@@ -48,7 +43,7 @@ fi
 systemctl enable NetworkManager.service
 systemctl enable tuned.service tuned-ppd.service
 systemctl enable snapper-timeline.timer snapper-cleanup.timer
-systemctl enable proto-update-prepare.path proto-update-sync.service
+systemctl enable proto-etc-merge.service systemd-sysupdate.timer
 # Only bless a counted UKI after the normal boot completed without failed
 # system units. systemd-bless-boot-generator pulls in the blessing service when
 # the firmware reports that the current UKI has a boot counter.
@@ -87,17 +82,11 @@ rm -f /usr/share/factory/etc/sysconfig/snapper
 # update untouched files and preserve administrator changes.
 /usr/lib/proto-etc-factory seed /usr/share/factory/etc
 
-# Ship target-disk repart definitions with the immutable payload. The live
-# installer uses these with --copy-source=/ and --empty=force.
-installer_repart=/usr/lib/proto/installer-repart.d
-install -d -m 0755 "${installer_repart}"
-
-# Runtime consumers must not have to infer the deployment-specific /etc name
-# from a mutable file. This metadata is immutable and generated per image.
+# The mutable configuration is shared by both authenticated /usr slots. The
+# early merge service updates untouched vendor files and preserves local edits.
 cat > /usr/lib/proto/deployment.env <<EOF
 IMAGE_ID=${IMAGE_ID}
-IMAGE_VERSION=${IMAGE_VERSION}
-ETC_SUBVOLUME=@etc-${IMAGE_ID}-${IMAGE_VERSION}
+ETC_SUBVOLUME=@etc
 EOF
 
 # systemd-repart validates MakeSymlinks= sources inside the new filesystem.
@@ -112,27 +101,6 @@ ln -s usr/lib "${installer_root_skeleton}/lib"
 ln -s usr/lib64 "${installer_root_skeleton}/lib64"
 ln -s usr/sbin "${installer_root_skeleton}/sbin"
 
-cat > "${installer_repart}/00-esp.conf" <<'EOF'
-[Partition]
-Type=esp
-Format=vfat
-CopyFiles=/efi:/
-SizeMinBytes=4G
-SizeMaxBytes=4G
-EOF
-cat > "${installer_repart}/10-root.conf" <<EOF
-[Partition]
-Type=root
-Format=btrfs
-SizeMinBytes=8G
-CopyFiles=/.system/@deployments:/@deployments
-CopyFiles=/usr/lib/proto/installer-root-skeleton:/@root
-CopyFiles=/usr/share/factory/etc:/@etc-${IMAGE_ID}-${IMAGE_VERSION}
-MakeDirectories=/@root/dev /@root/efi /@root/etc /@root/home /@root/media /@root/mnt /@root/opt /@root/proc /@root/root /@root/run /@root/srv /@root/.system /@root/sys /@root/tmp /@root/usr /@root/var /@etc-${IMAGE_ID}-${IMAGE_VERSION} /@deployments
-Subvolumes=/@root /@etc-${IMAGE_ID}-${IMAGE_VERSION} /@deployments
-DefaultSubvolume=/@root
-EOF
-
 if [[ "${IMAGE_ID}" == proto-gnome ]]; then
     # GNOME shows only the battery icon by default. Make the percentage a
     # vendor default for both the live account and users created later by
@@ -145,43 +113,10 @@ EOF
     glib-compile-schemas /usr/share/glib-2.0/schemas
 fi
 
-# mkosi's built-in relabel pass runs after finalize scripts. Since the image is
-# produced here, label /usr explicitly before sealing it into EROFS. The
-# installed mutable trees are relabeled by the installer after CopyFiles=.
-selinux_type=$(sed -n 's/^SELINUXTYPE=//p' /etc/selinux/config | tail -n1)
-selinux_type=${selinux_type:-targeted}
-selinux_contexts="/etc/selinux/${selinux_type}/contexts/files/file_contexts"
-selinux_policy=$(find "/etc/selinux/${selinux_type}/policy" \
-    -maxdepth 1 -type f -name 'policy.*' -print | sort -V | tail -n1)
-[[ -f "${selinux_contexts}" ]] || {
-    printf 'SELinux file contexts not found: %s\n' "${selinux_contexts}" >&2
-    exit 1
-}
-[[ -n "${selinux_policy}" && -f "${selinux_policy}" ]] || {
-    printf 'SELinux binary policy not found for type %s\n' "${selinux_type}" >&2
-    exit 1
-}
-# Relabel disabled
-#setfiles -mF -c "${selinux_policy}" "${selinux_contexts}" /usr
-
-# Keep this as a naked filesystem image. The initrd mounts it through a loop
-# device using rd.systemd.mount-extra= after the Btrfs root is available.
-mkfs.erofs \
-    -T "${SOURCE_DATE_EPOCH:?mkosi did not export SOURCE_DATE_EPOCH}" \
-    --ignore-mtime \
-    "${deployment}" \
-    /usr
-
-# Besides embedding the deployment in the installation disk, publish the same
-# bytes as a first-class update artifact next to the split UKI.
-install -m 0644 \
-    "${deployment}" \
-    "${CHROOT_OUTPUTDIR}/${IMAGE_ID}-${IMAGE_VERSION}.${ARCHITECTURE}.usr.erofs"
-
 # Both desktop disk images double as live media. Their mutable state gets a
 # passwordless autologin account and authorization for the installer. None of
 # this is present in /usr/share/factory/etc, so it is not copied to the target.
-if [[ "${IMAGE_ID}" == proto-gnome || "${IMAGE_ID}" == kde ]]; then
+if [[ "${IMAGE_ID}" == proto-gnome || "${IMAGE_ID}" == proto-kde ]]; then
     if [[ "${IMAGE_ID}" == proto-kde ]]; then
         # Put Plasma's live-only policy into the skeleton before useradd so the
         # account creation code copies it with the correct ownership even when

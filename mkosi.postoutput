@@ -1,7 +1,95 @@
 #!/usr/bin/bash
 set -euo pipefail
 
-input="$OUTPUTDIR/${IMAGE_ID}-${IMAGE_VERSION}.${ARCHITECTURE}.usr.erofs"
+# The top-level mkosi-obs include cannot propagate its non-inheritable
+# post-output script into dependency images. Include the helper explicitly.
+obs_build=false
+source_dir=${SRCDIR:?}
+if [[ -s /usr/src/packages/SOURCES/_projectcert.crt ]]; then
+    obs_build=true
+    source_dir=
+    for candidate in /usr/src/packages/SOURCES/*; do
+        if [[ -f ${candidate}/mkosi.postoutput && -f ${candidate}/mkosi.final-output ]]; then
+            source_dir=${candidate}
+            break
+        fi
+    done
+    [[ -n ${source_dir} ]] || {
+        echo "mkosi source tree containing mkosi.final-output not found" >&2
+        exit 1
+    }
 
-desync make --chunk-size 1024:2048:4096 "$OUTPUTDIR/${IMAGE_ID}-${IMAGE_VERSION}.${ARCHITECTURE}.usr.erofs.caibx" "$input"
-    
+    obs_postoutput=$(python3 -c 'import importlib.resources; print(importlib.resources.files("mkosi") / "resources" / "mkosi-obs" / "mkosi.postoutput")')
+    [[ -f ${obs_postoutput} ]] || {
+        echo "mkosi-obs post-output helper not found: ${obs_postoutput}" >&2
+        exit 1
+    }
+    /usr/bin/bash "${obs_postoutput}"
+fi
+
+shopt -s nullglob
+usrs=("$OUTPUTDIR"/"$IMAGE_ID"_"$IMAGE_VERSION"_"$ARCHITECTURE".usr-"$ARCHITECTURE"-[[:xdigit:]]*.raw)
+verities=("$OUTPUTDIR"/"$IMAGE_ID"_"$IMAGE_VERSION"_"$ARCHITECTURE".usr-"$ARCHITECTURE"-verity-*.raw)
+
+if (( ${#usrs[@]} != 1 )); then
+    printf 'Expected one split EROFS /usr artifact for %s, found %d\n' \
+        "$IMAGE_ID" "${#usrs[@]}" >&2
+    printf 'Candidates: %s\n' "${usrs[*]:-<none>}" >&2
+    exit 1
+fi
+if (( ${#verities[@]} != 1 )); then
+    printf 'Expected one split usr-verity artifact for %s, found %d\n' \
+        "$IMAGE_ID" "${#verities[@]}" >&2
+    printf 'Candidates: %s\n' "${verities[*]:-<none>}" >&2
+    exit 1
+fi
+
+desync make --chunk-size 1024:2048:4096 "${usrs[0]}.caibx" "${usrs[0]}"
+
+if [[ ${obs_build} == false ]]; then
+    (
+        cd "$OUTPUTDIR"
+        sha256sum "$(basename "${usrs[0]}.caibx")" > "$(basename "${usrs[0]}.caibx").sha256"
+    )
+fi
+
+for artifact in "${usrs[0]}" "${verities[0]}"; do
+    xz --threads=0 --keep --force "${artifact}"
+    if [[ ${obs_build} == false ]]; then
+        (
+            cd "$OUTPUTDIR"
+            sha256sum "$(basename "${artifact}.xz")" > "$(basename "${artifact}.xz").sha256"
+        )
+    fi
+done
+
+# The OBS attachment stage reconstructs these split files from the signed disk.
+if [[ ${obs_build} == true ]]; then
+    rm -f -- "${usrs[0]}" "${verities[0]}"
+fi
+
+disk="$OUTPUTDIR/${IMAGE_ID}_${IMAGE_VERSION}_${ARCHITECTURE}.raw"
+[[ -f ${disk} ]] || {
+    printf 'Expected complete raw disk image not found: %s\n' "$disk" >&2
+    exit 1
+}
+
+if [[ ${obs_build} == true ]]; then
+    recipe=${OUTPUTDIR}/mkosi.conf
+    [[ -f ${recipe} ]] || {
+        echo "mkosi-obs did not create its second-stage recipe" >&2
+        exit 1
+    }
+    install -m 0755 "${source_dir}/mkosi.final-output" "${OUTPUTDIR}/mkosi.final-output"
+    cat >> "${recipe}" <<'EOF'
+
+[Content]
+BuildScripts=%D/mkosi.final-output
+EOF
+else
+    xz --threads=0 --keep --force "$disk"
+    (
+        cd "$OUTPUTDIR"
+        sha256sum "$(basename "${disk}.xz")" > "$(basename "${disk}.xz").sha256"
+    )
+fi

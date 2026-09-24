@@ -1,0 +1,13 @@
+[Unit]
+Description=Merge vendor defaults into persistent /etc
+DefaultDependencies=no
+ConditionPathExists=!/etc/proto-live
+After=local-fs.target
+Before=systemd-tmpfiles-setup.service NetworkManager.service display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/proto-etc-factory merge --etc=/etc --factory=/usr/share/factory/etc
+
+[Install]
+WantedBy=sysinit.target

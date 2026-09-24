@@ -1,0 +1,24 @@
+#!/usr/bin/bash
+set -euo pipefail
+
+root=${BUILDROOT:?}
+
+# mkosi-obs injects the current OBS project certificate for PE/UKI signing.
+# systemd-sysupdate verifies SHA256SUMS.gpg with the corresponding public
+# OpenPGP key embedded in the immutable /usr image.
+source_dir=
+for candidate in "${CHROOT_SRCDIR:?}" /usr/src/packages/SOURCES/*; do
+    if [[ -f ${candidate}/mkosi.finalize && -s ${candidate}/mkosi.keys/obs-project.pgp.b64 ]]; then
+        source_dir=${candidate}
+        break
+    fi
+done
+[[ -n ${source_dir} ]] || {
+    echo "mkosi source tree containing the OBS public key not found" >&2
+    exit 1
+}
+
+install -d -m 0755 "${root}/usr/lib/systemd"
+base64 -d "${source_dir}/mkosi.keys/obs-project.pgp.b64" \
+    > "${root}/usr/lib/systemd/import-pubring.pgp"
+chmod 0644 "${root}/usr/lib/systemd/import-pubring.pgp"

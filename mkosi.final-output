@@ -1,0 +1,16 @@
+#!/usr/bin/bash
+set -euo pipefail
+
+# Run after mkosi-obs attached all signatures and reconstructed the final disk.
+output_dir=${OUTPUTDIR:-${SRCDIR:?}/usr/src/packages/OTHER}
+
+shopt -s nullglob
+disks=("${output_dir}"/*_"${IMAGE_VERSION}"_"${ARCHITECTURE}".raw)
+(( ${#disks[@]} > 0 )) || {
+    echo "No final signed raw disk images found for ${IMAGE_VERSION}/${ARCHITECTURE}" >&2
+    exit 1
+}
+
+for disk in "${disks[@]}"; do
+    xz --threads=0 --keep --force "${disk}"
+done

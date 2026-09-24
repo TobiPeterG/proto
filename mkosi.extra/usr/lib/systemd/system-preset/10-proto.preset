@@ -1,2 +1,4 @@
 enable ca-certificates-setup.service
 enable kde-linux-sysupdated.service
+enable proto-etc-merge.service
+enable systemd-sysupdate.timer
