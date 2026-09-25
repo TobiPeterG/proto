@@ -28,8 +28,16 @@ if [[ -s /usr/src/packages/SOURCES/_projectcert.crt ]]; then
 fi
 
 shopt -s nullglob
-usrs=("$OUTPUTDIR"/"$IMAGE_ID"_"$IMAGE_VERSION"_"$ARCHITECTURE".usr-"$ARCHITECTURE"-[[:xdigit:]]*.raw)
-verities=("$OUTPUTDIR"/"$IMAGE_ID"_"$IMAGE_VERSION"_"$ARCHITECTURE".usr-"$ARCHITECTURE"-verity-*.raw)
+if [[ ${obs_build} == true ]]; then
+    compression_suffix=zst
+else
+    compression_suffix=xz
+fi
+
+# CompressOutput= applies to split partition artifacts as well as the complete
+# disk image. They have already been compressed by mkosi when this hook runs.
+usrs=("$OUTPUTDIR"/"$IMAGE_ID"_"$IMAGE_VERSION"_"$ARCHITECTURE".usr-"$ARCHITECTURE"-[[:xdigit:]]*.raw."$compression_suffix")
+verities=("$OUTPUTDIR"/"$IMAGE_ID"_"$IMAGE_VERSION"_"$ARCHITECTURE".usr-"$ARCHITECTURE"-verity-*.raw."$compression_suffix")
 
 if (( ${#usrs[@]} != 1 )); then
     printf 'Expected one split EROFS /usr artifact for %s, found %d\n' \
@@ -44,26 +52,14 @@ if (( ${#verities[@]} != 1 )); then
     exit 1
 fi
 
-for artifact in "${usrs[0]}" "${verities[0]}"; do
-    xz --threads=0 --force "${artifact}"
-    if [[ ${obs_build} == false ]]; then
-        (
-            cd "$OUTPUTDIR"
-            sha256sum "$(basename "${artifact}.xz")" > "$(basename "${artifact}.xz").sha256"
-        )
-    fi
-done
-
-disk="$OUTPUTDIR/${IMAGE_ID}_${IMAGE_VERSION}_${ARCHITECTURE}.raw"
-[[ -f ${disk} ]] || {
-    printf 'Expected complete raw disk image not found: %s\n' "$disk" >&2
-    exit 1
-}
-
 if [[ ${obs_build} == true ]]; then
-    # mkosi-obs supports Zstd-compressed disk images. Compress the temporary
-    # handoff so OBS does not copy the large raw disk into its signing sandbox.
-    zstd --threads=0 --force --rm "${disk}"
+    # mkosi compresses the primary disk before post-output scripts run. OBS
+    # uses Zstd so mkosi-obs can unpack, modify and recompress it in stage two.
+    disk="$OUTPUTDIR/${IMAGE_ID}_${IMAGE_VERSION}_${ARCHITECTURE}.raw.zst"
+    [[ -f ${disk} ]] || {
+        printf 'Expected Zstd-compressed OBS disk image not found: %s\n' "$disk" >&2
+        exit 1
+    }
     recipe=${OUTPUTDIR}/mkosi.conf
     [[ -f ${recipe} ]] || {
         echo "mkosi-obs did not create its second-stage recipe" >&2
@@ -76,9 +72,10 @@ if [[ ${obs_build} == true ]]; then
 BuildScripts=%D/mkosi.final-output
 EOF
 else
-    xz --threads=0 --force "$disk"
-    (
-        cd "$OUTPUTDIR"
-        sha256sum "$(basename "${disk}.xz")" > "$(basename "${disk}.xz").sha256"
-    )
+    # Local builds use mkosi's native XZ output.
+    disk="$OUTPUTDIR/${IMAGE_ID}_${IMAGE_VERSION}_${ARCHITECTURE}.raw.xz"
+    [[ -f ${disk} ]] || {
+        printf 'Expected XZ-compressed local disk image not found: %s\n' "$disk" >&2
+        exit 1
+    }
 fi
