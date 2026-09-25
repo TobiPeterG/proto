@@ -36,8 +36,8 @@ fi
 
 # CompressOutput= applies to split partition artifacts as well as the complete
 # disk image. They have already been compressed by mkosi when this hook runs.
-usrs=("$OUTPUTDIR"/"$IMAGE_ID"_"$IMAGE_VERSION"_"$ARCHITECTURE".usr-"$ARCHITECTURE"-[[:xdigit:]]*.raw."$compression_suffix")
-verities=("$OUTPUTDIR"/"$IMAGE_ID"_"$IMAGE_VERSION"_"$ARCHITECTURE".usr-"$ARCHITECTURE"-verity-*.raw."$compression_suffix")
+usrs=("$OUTPUTDIR"/"$IMAGE_ID"_"$IMAGE_VERSION"_"$ARCHITECTURE".usr-"$ARCHITECTURE".[[:xdigit:]]*.raw."$compression_suffix")
+verities=("$OUTPUTDIR"/"$IMAGE_ID"_"$IMAGE_VERSION"_"$ARCHITECTURE".usr-"$ARCHITECTURE"-verity.*.raw."$compression_suffix")
 
 if (( ${#usrs[@]} != 1 )); then
     printf 'Expected one split EROFS /usr artifact for %s, found %d\n' \

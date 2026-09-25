@@ -5,24 +5,15 @@ set -euo pipefail
 # reconstructed the final artifacts. The complete disk crosses the OBS stage
 # boundary as Zstd, but XZ is the sole publication format.
 output_dir=${OUTPUTDIR:-${SRCDIR:?}/usr/src/packages/OTHER}
-prefix=${IMAGE_ID}_${IMAGE_VERSION}_${ARCHITECTURE}
 
 shopt -s nullglob
-disk=${output_dir}/${prefix}.raw.zst
-uki=${output_dir}/${prefix}.efi
-[[ -f ${disk} ]] || {
-    echo "Final signed Zstd disk image not found: ${disk}" >&2
-    exit 1
-}
-[[ -f ${uki} ]] || {
-    echo "Expected final signed UKI not found: ${uki}" >&2
-    exit 1
-}
-
-# Convert Zstd artifacts directly to XZ without materializing another raw copy.
-zstds=("${output_dir}/${prefix}"*.raw.zst)
+# The second OBS stage contains the artifacts of all dependency images, but it
+# runs this hook only once with IMAGE_ID set to one of them.
+# Convert all final partition and disk artifacts directly to XZ without
+# materializing another raw copy.
+zstds=("${output_dir}"/*.raw.zst)
 (( ${#zstds[@]} > 0 )) || {
-    echo "No final Zstd artifacts found for ${prefix}" >&2
+    echo "No final Zstd artifacts found in ${output_dir}" >&2
     exit 1
 }
 for zstd_image in "${zstds[@]}"; do
@@ -37,7 +28,7 @@ done
 
 # Be defensive if mkosi-obs produces an uncompressed split artifact in a
 # future version: compress it and remove the raw file as well.
-raws=("${output_dir}/${prefix}"*.raw)
+raws=("${output_dir}"/*.raw)
 for raw in "${raws[@]}"; do
     xz --threads=0 --force "${raw}"
 done

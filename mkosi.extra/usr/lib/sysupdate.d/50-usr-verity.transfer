@@ -5,7 +5,7 @@ Verify=yes
 [Source]
 Type=url-file
 Path=https://download.opensuse.org/repositories/home:/Tobi_Peter:/proto/mkosi/
-MatchPattern=%M_@v_%a.usr-%a-verity-@u.raw.xz
+MatchPattern=%M_@v_%a.usr-%a-verity.@u.raw.xz
 
 [Target]
 Type=partition
