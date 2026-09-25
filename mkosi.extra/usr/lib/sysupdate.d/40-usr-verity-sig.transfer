@@ -1,0 +1,17 @@
+[Transfer]
+ProtectVersion=%A
+Verify=yes
+
+[Source]
+Type=url-file
+Path=https://download.opensuse.org/repositories/home:/Tobi_Peter:/proto/mkosi/
+MatchPattern=%M_@v_%a.usr-%a-verity-sig-@u.raw.xz
+
+[Target]
+Type=partition
+Path=auto
+MatchPattern=%M_@v
+MatchPartitionType=usr-verity-sig
+PartitionFlags=0
+ReadOnly=yes
+InstancesMax=2
