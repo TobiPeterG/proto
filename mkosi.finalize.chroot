@@ -43,7 +43,7 @@ fi
 systemctl enable NetworkManager.service
 systemctl enable tuned.service tuned-ppd.service
 systemctl enable snapper-timeline.timer snapper-cleanup.timer
-systemctl enable proto-etc-merge.service proto-tpm2-rebind.service \
+systemctl enable proto-etc-merge.service \
     systemd-sysupdate.timer
 # Only bless a counted UKI after the normal boot completed without failed
 # system units. systemd-bless-boot-generator pulls in the blessing service when
