@@ -1,0 +1,12 @@
+<services>
+  <service name="obs_scm" mode="manual">
+    <param name="scm">git</param>
+    <param name="url">https://github.com/TobiPeterG/proto.git</param>
+    <param name="revision">main</param>
+    <param name="versionformat">0+git%cd.%h</param>
+    <param name="filename">proto</param>
+    <param name="extract-rename">mkosi.obs/kde.conf:mkosi.conf</param>
+    <param name="exclude">mkosi.obs/gnome.marker</param>
+    <param name="changesgenerate">enable</param>
+  </service>
+</services>

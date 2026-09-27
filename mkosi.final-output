@@ -7,13 +7,12 @@ set -euo pipefail
 output_dir=${OUTPUTDIR:-${SRCDIR:?}/usr/src/packages/OTHER}
 
 shopt -s nullglob
-# The second OBS stage contains the artifacts of all dependency images, but it
-# runs this hook only once with IMAGE_ID set to one of them.
-# Convert all final partition and disk artifacts directly to XZ without
-# materializing another raw copy.
-zstds=("${output_dir}"/*.raw.zst)
+# Each OBS package contains one desktop image. Convert only that image's final
+# partition and disk artifacts directly to XZ without materializing another
+# raw copy.
+zstds=("${output_dir}/${IMAGE_ID}_"*.raw.zst)
 (( ${#zstds[@]} > 0 )) || {
-    echo "No final Zstd artifacts found in ${output_dir}" >&2
+    echo "No final Zstd artifacts found for ${IMAGE_ID} in ${output_dir}" >&2
     exit 1
 }
 for zstd_image in "${zstds[@]}"; do
@@ -28,7 +27,7 @@ done
 
 # Be defensive if mkosi-obs produces an uncompressed split artifact in a
 # future version: compress it and remove the raw file as well.
-raws=("${output_dir}"/*.raw)
+raws=("${output_dir}/${IMAGE_ID}_"*.raw)
 for raw in "${raws[@]}"; do
     xz --threads=0 --force "${raw}"
 done

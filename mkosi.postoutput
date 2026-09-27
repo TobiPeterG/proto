@@ -1,43 +1,27 @@
 #!/usr/bin/bash
 set -euo pipefail
 
-# The top-level mkosi-obs include cannot propagate its non-inheritable
-# post-output script into dependency images. Include the helper explicitly.
-obs_build=false
-source_dir=${SRCDIR:?}
-if [[ -s /usr/src/packages/SOURCES/_projectcert.crt ]]; then
-    obs_build=true
-    source_dir=
-    for candidate in /usr/src/packages/SOURCES/*; do
-        if [[ -f ${candidate}/mkosi.postoutput && -f ${candidate}/mkosi.final-output ]]; then
-            source_dir=${candidate}
-            break
-        fi
-    done
-    [[ -n ${source_dir} ]] || {
-        echo "mkosi source tree containing mkosi.final-output not found" >&2
-        exit 1
-    }
-
-    obs_postoutput=$(python3 -c 'import importlib.resources; print(importlib.resources.files("mkosi") / "resources" / "mkosi-obs" / "mkosi.postoutput")')
-    [[ -f ${obs_postoutput} ]] || {
-        echo "mkosi-obs post-output helper not found: ${obs_postoutput}" >&2
-        exit 1
-    }
-    /usr/bin/bash "${obs_postoutput}"
-fi
+# The per-image OBS drop-in includes mkosi-obs before registering this script,
+# so the upstream helper has already staged hashes and written the follow-up
+# recipe when this runs.
+source_dir=
+for candidate in /usr/src/packages/SOURCES/*; do
+    if [[ -f ${candidate}/mkosi.final-output ]]; then
+        source_dir=${candidate}
+        break
+    fi
+done
+[[ -n ${source_dir} ]] || {
+    echo "mkosi source tree containing mkosi.final-output not found" >&2
+    exit 1
+}
 
 shopt -s nullglob
-if [[ ${obs_build} == true ]]; then
-    compression_suffix=zst
-else
-    compression_suffix=xz
-fi
 
 # CompressOutput= applies to split partition artifacts as well as the complete
 # disk image. They have already been compressed by mkosi when this hook runs.
-usrs=("$OUTPUTDIR"/"$IMAGE_ID"_"$IMAGE_VERSION"_"$ARCHITECTURE".usr-"$ARCHITECTURE".[[:xdigit:]]*.raw."$compression_suffix")
-verities=("$OUTPUTDIR"/"$IMAGE_ID"_"$IMAGE_VERSION"_"$ARCHITECTURE".usr-"$ARCHITECTURE"-verity.*.raw."$compression_suffix")
+usrs=("$OUTPUTDIR"/"$IMAGE_ID"_"$IMAGE_VERSION"_"$ARCHITECTURE".usr-"$ARCHITECTURE".[[:xdigit:]]*.raw.zst)
+verities=("$OUTPUTDIR"/"$IMAGE_ID"_"$IMAGE_VERSION"_"$ARCHITECTURE".usr-"$ARCHITECTURE"-verity.*.raw.zst)
 
 if (( ${#usrs[@]} != 1 )); then
     printf 'Expected one split EROFS /usr artifact for %s, found %d\n' \
@@ -52,30 +36,19 @@ if (( ${#verities[@]} != 1 )); then
     exit 1
 fi
 
-if [[ ${obs_build} == true ]]; then
-    # mkosi compresses the primary disk before post-output scripts run. OBS
-    # uses Zstd so mkosi-obs can unpack, modify and recompress it in stage two.
-    disk="$OUTPUTDIR/${IMAGE_ID}_${IMAGE_VERSION}_${ARCHITECTURE}.raw.zst"
-    [[ -f ${disk} ]] || {
-        printf 'Expected Zstd-compressed OBS disk image not found: %s\n' "$disk" >&2
-        exit 1
-    }
-    recipe=${OUTPUTDIR}/mkosi.conf
-    [[ -f ${recipe} ]] || {
-        echo "mkosi-obs did not create its second-stage recipe" >&2
-        exit 1
-    }
-    install -m 0755 "${source_dir}/mkosi.final-output" "${OUTPUTDIR}/mkosi.final-output"
-    cat >> "${recipe}" <<'EOF'
+disk="$OUTPUTDIR/${IMAGE_ID}_${IMAGE_VERSION}_${ARCHITECTURE}.raw.zst"
+[[ -f ${disk} ]] || {
+    printf 'Expected Zstd-compressed OBS disk image not found: %s\n' "$disk" >&2
+    exit 1
+}
+recipe=${OUTPUTDIR}/mkosi.conf
+[[ -f ${recipe} ]] || {
+    echo "mkosi-obs did not create its second-stage recipe" >&2
+    exit 1
+}
+install -m 0755 "${source_dir}/mkosi.final-output" "${OUTPUTDIR}/mkosi.final-output"
+cat >> "${recipe}" <<'RECIPE'
 
 [Content]
 BuildScripts=%D/mkosi.final-output
-EOF
-else
-    # Local builds use mkosi's native XZ output.
-    disk="$OUTPUTDIR/${IMAGE_ID}_${IMAGE_VERSION}_${ARCHITECTURE}.raw.xz"
-    [[ -f ${disk} ]] || {
-        printf 'Expected XZ-compressed local disk image not found: %s\n' "$disk" >&2
-        exit 1
-    }
-fi
+RECIPE
