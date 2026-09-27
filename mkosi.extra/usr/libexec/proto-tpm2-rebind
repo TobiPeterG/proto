@@ -1,0 +1,37 @@
+#!/bin/bash
+set -euo pipefail
+
+readonly marker=/var/lib/proto/tpm2-rebind-needed
+readonly final_pcrs=0+4+5+7+9
+
+[[ -r "${marker}" ]] || exit 0
+[[ -c /dev/tpmrm0 ]] || {
+    echo "TPM 2.0 device is unavailable; keeping the initial enrollment" >&2
+    exit 1
+}
+
+luks_uuid="$(<"${marker}")"
+[[ "${luks_uuid}" =~ ^[[:xdigit:]-]+$ ]] || {
+    echo "Invalid LUKS UUID in ${marker}" >&2
+    exit 1
+}
+
+device="/dev/disk/by-uuid/${luks_uuid}"
+for _ in {1..30}; do
+    [[ -b "${device}" ]] && break
+    sleep 1
+done
+[[ -b "${device}" ]] || {
+    echo "LUKS device ${device} did not appear" >&2
+    exit 1
+}
+
+/usr/bin/systemd-cryptenroll \
+    --unlock-tpm2-device=auto \
+    --wipe-slot=tpm2 \
+    --tpm2-device=auto \
+    --tpm2-pcrs="${final_pcrs}" \
+    --tpm2-pcrlock= \
+    "${device}"
+
+rm -f -- "${marker}"

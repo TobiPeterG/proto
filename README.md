@@ -6,24 +6,28 @@ updated atomically through a native A/B partition layout.
 
 ## Disk layout
 
-A newly created image normally contains six GPT partitions:
+A newly created image normally contains nine GPT partitions:
 
-1. a 4 GiB EFI System Partition containing systemd-boot and versioned UKIs;
-2. an 8 GiB EROFS `/usr` partition;
-3. a 128 MiB dm-verity hash partition for that `/usr` slot;
-4. an empty 8 GiB `/usr` update slot;
-5. an empty 128 MiB usr-verity update slot;
-6. a writable Btrfs `USER` partition occupying the remaining space.
+1. a 100–256 MiB EFI System Partition containing Shim and systemd-boot;
+2. a 4 GiB XBOOTLDR partition containing versioned UKIs;
+3. an 8 GiB EROFS `/usr` partition;
+4. a 128 MiB dm-verity hash partition for that `/usr` slot;
+5. its dm-verity signature partition;
+6. an empty 8 GiB `/usr` update slot;
+7. an empty 128 MiB usr-verity update slot;
+8. an empty usr-verity signature slot;
+9. a writable Btrfs `USER` partition occupying the remaining space.
 
-The first `/usr`/Verity pair is populated during the image build. The second
-pair uses `Format=empty`, making it available to `systemd-sysupdate`. Both
+The first `/usr`/Verity set is populated during the image build. The second
+set uses empty partitions, making it available to `systemd-sysupdate`. Both
 system slots have fixed sizes; only the final Btrfs partition grows when the
 image is written to a larger disk.
 
-The ESP has a fixed size of 4 GiB and contains both the systemd-boot files from
-`/efi` and the UKIs from `/boot`. Keeping these in one partition matches the
-OBS signing integration, which extracts and reinstalls signed EFI binaries in
-the ESP, and avoids the systemd-repart `SupplementFor=` merge path.
+XBOOTLDR is always present and mounted as `/boot`; the ESP is mounted as
+`/efi`. This keeps the ESP compatible with small firmware- or
+Windows-created partitions while reserving 4 GiB for the two large UKIs.
+`systemd-sysupdate` targets `$BOOT/EFI/Linux`, which resolves to XBOOTLDR
+when both partitions exist.
 
 The Btrfs partition remains the root partition and has this subvolume layout:
 
@@ -90,9 +94,9 @@ attached, the disk is converted directly from Zstd to XZ. Published disk and
 partition images are therefore XZ-only without an oversized OBS disk request.
 
 The complete uncompressed disk is sparse but has a nominal minimum size of
-roughly 28.25 GiB: a 4 GiB ESP, two 8 GiB `/usr` slots, two 128 MiB Verity
-slots and at least 8 GiB Btrfs state. A practical target is a 32 GB device or
-larger.
+roughly 28.4 GiB: a 4 GiB XBOOTLDR, a 100–256 MiB ESP, two 8 GiB `/usr`
+slots, two 128 MiB Verity slots and at least 8 GiB Btrfs state. A practical
+target is a 32 GB device or larger.
 
 ## Installation
 
@@ -105,12 +109,22 @@ xzcat mkosi.output/proto-gnome_20260831_x86-64.raw.xz | \
 sync
 ```
 
-The graphical installer invokes `systemd-repart` on the selected target disk.
-`CopyBlocks=auto` clones the currently verified `/usr` and usr-verity
-partitions and preserves their partition UUIDs, so the root hash embedded in
-the UKI remains valid. It creates a fresh empty B slot and a fresh Btrfs
-partition. The latter is initialized from `/usr/share/factory/etc`; live-user
-autologin and installer authorization are not copied to the installed system.
+The graphical installer is `tik`. Its self-deploy path invokes
+`systemd-repart` on the selected target disk. `CopyBlocks=auto` clones the
+currently verified `/usr`, usr-verity and signature partitions and preserves
+their partition UUIDs, so the root hash embedded in the UKI remains valid. It
+creates a fresh empty B slot and a fresh LUKS2-encrypted Btrfs partition. The
+latter is initialized from `/usr/share/factory/etc`; live-user autologin and
+installer authorization are not copied to the installed system.
+
+The user chooses a LUKS passphrase during installation and receives an
+independent recovery key. If a TPM 2.0 is present, the installer initially
+enrolls it against PCRs 0 and 7, which are shared between the live and
+installed boot. On the first installed boot,
+`proto-tpm2-rebind.service` replaces that temporary token with a token bound
+to PCRs 0, 4, 5, 7 and 9. The password and recovery key are never removed, so
+firmware, Secure Boot, partition-table or UKI changes can still be recovered
+from.
 
 Installation erases the selected disk. Test the workflow with a disposable
 virtual disk before using physical hardware.
@@ -123,13 +137,14 @@ The native transfer definitions under `/usr/lib/sysupdate.d` use:
 https://download.opensuse.org/repositories/home:/Tobi_Peter:/proto/mkosi/
 ```
 
-An update consists of three authenticated artifacts:
+An update consists of four authenticated artifacts:
 
 - the new EROFS `/usr` partition;
 - its usr-verity hash partition;
+- its usr-verity signature partition;
 - the matching signed UKI.
 
-`systemd-sysupdate` writes the two partition artifacts to the inactive slot
+`systemd-sysupdate` writes the three partition artifacts to the inactive slot
 and publishes the UKI with systemd-boot's boot-counting suffix. The previous
 slot and UKI remain available for automatic rollback. System updates therefore
 do not require free space in `/home` or `/var`.
@@ -164,5 +179,5 @@ retain six hourly, seven daily, four weekly and two monthly snapshots. The
 mutable `/etc/sysconfig/snapper` list is excluded from factory management.
 
 Distrobox uses Podman and crun. Container and Flatpak SELinux policies are
-part of the immutable host. TPM tooling is included, but disk encryption and
-TPM-bound state encryption are not enabled yet.
+part of the immutable host. Installed systems encrypt their mutable Btrfs
+state with LUKS2 and retain password, recovery-key and optional TPM2 unlocks.

@@ -43,7 +43,8 @@ fi
 systemctl enable NetworkManager.service
 systemctl enable tuned.service tuned-ppd.service
 systemctl enable snapper-timeline.timer snapper-cleanup.timer
-systemctl enable proto-etc-merge.service systemd-sysupdate.timer
+systemctl enable proto-etc-merge.service proto-tpm2-rebind.service \
+    systemd-sysupdate.timer
 # Only bless a counted UKI after the normal boot completed without failed
 # system units. systemd-bless-boot-generator pulls in the blessing service when
 # the firmware reports that the current UKI has a boot counter.
@@ -84,6 +85,7 @@ rm -f /usr/share/factory/etc/sysconfig/snapper
 
 # The mutable configuration is shared by both authenticated /usr slots. The
 # early merge service updates untouched vendor files and preserves local edits.
+install -d -m 0755 /usr/lib/proto
 cat > /usr/lib/proto/deployment.env <<EOF
 IMAGE_ID=${IMAGE_ID}
 ETC_SUBVOLUME=@etc

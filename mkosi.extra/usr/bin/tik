@@ -1,0 +1,85 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: Copyright 2023-2024 SUSE LLC
+# SPDX-FileCopyrightText: Copyright 2023-2024 Richard Brown
+# SPDX-FileCopyrightText: Copyright 2025 Tobias Görgens
+
+# Define variables
+# Style notes
+# lowercase variables = internal, not expected to be defined by users
+# uppercase variables = user facing, expected to be set by config
+
+tik_log=~/tik.log
+tik_dir=/usr/lib/tik
+tik_module="tik"
+
+# Common helpers used by tik and modules
+. ${tik_dir}/lib/tik-functions
+# Core installer logic used only by tik and phase scripts
+. ${tik_dir}/lib/tik-core
+
+# Start logging
+exec 2> >(exec tee -i -a "${tik_log}" >&2)
+logging=true
+log "[START] $0"
+
+# Check for debug mode
+if [[ ${1:-} == "--debug" ]]; then
+    debug=1
+fi
+
+# Check if graphical display is available
+XDG_SESSION_TYPE="${XDG_SESSION_TYPE:=unspecified}"
+if [ "${XDG_SESSION_TYPE}" = "wayland" ] || [ "${XDG_SESSION_TYPE}" = "x11" ] ; then
+    gui=true
+else
+    gui=false
+fi
+
+# Read configuration files, /usr first, then /etc
+. ${tik_dir}/config
+if [[ -r "${TIK_CUSTOM_DIR}/config" ]]; then
+    . "${TIK_CUSTOM_DIR}/config"
+fi
+
+# Check essential paths exist
+if [ ! -d "${TIK_IMG_DIR}" ]; then
+    error "${TIK_IMG_DIR} does not exist"
+fi
+
+# Determine name of to-be-installed system
+tik_detect_identity
+
+cleanup() {
+    retval=$?
+    unset TIK_INSTALL_PASSPHRASE
+    log "[STOP][${retval}] $0"
+    if [ "${debug}" == "1" ]; then
+        d --timeout 5 --info --no-wrap --text="<b>Test Succeeded:</b>\n\nHave a nice day!"
+    elif [ "${retval}" == "0" ]; then
+        d --timeout 5 --info --no-wrap --title="Installation Complete!" --text="${TIK_OS_NAME} has been installed.\n\n<b>System is rebooting</b>"
+        prun systemctl reboot --force
+    else
+        d --error --no-wrap --title="Installation Failed" --text="Please file a bug report at <tt>${TIK_BUG_URL}</tt>\n\nPlease include <tt>${tik_log}</tt>. The live system will remain running so that the log can be copied."
+    fi
+}
+trap cleanup EXIT
+
+# Run pre modules
+tik_init_phase_modules "pre"
+load_modules "pre"
+load_modules "pre" "custom"
+
+# Select installation disk and image, then deploy image to disk
+get_disk
+get_img
+dump_image "${TIK_INSTALL_IMAGE}" "${TIK_INSTALL_DEVICE}"
+reread_partitiontable
+
+# Run post modules
+tik_init_phase_modules "post"
+load_modules "post"
+load_modules "post" "custom"
+
+wipe_keyfile
+set_boot_target

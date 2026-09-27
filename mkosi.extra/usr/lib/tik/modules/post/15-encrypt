@@ -1,0 +1,112 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: Copyright 2026 Tobias Görgens
+
+find_target_partition() {
+    local label=$1
+    lsblk "${TIK_INSTALL_DEVICE}" -nrpo PATH,PARTLABEL |
+        awk -v label="${label}" '$2 == label { print $1; exit }'
+}
+
+enroll_credentials() {
+    TIK_CRYPT_PART="$(find_target_partition USER)"
+    export TIK_CRYPT_PART
+    [[ -b "${TIK_CRYPT_PART}" ]] ||
+        error "Could not find the encrypted USER partition on ${TIK_INSTALL_DEVICE}"
+
+    tik_progress_step "Adding disk-encryption passphrase" 5
+    logging=false
+    if ! printf '%s' "${TIK_INSTALL_PASSPHRASE}" |
+        pkexec /usr/sbin/cryptsetup luksAddKey \
+            --key-file="${tik_keyfile}" \
+            --new-keyfile=- \
+            --force-password \
+            "${TIK_CRYPT_PART}"; then
+        logging=true
+        error "Could not add the disk-encryption passphrase"
+    fi
+    unset TIK_INSTALL_PASSPHRASE
+    logging=true
+
+    tik_progress_step "Generating recovery key" 20
+    logging=false
+    recovery_key="$(
+        pkexec /usr/bin/systemd-cryptenroll \
+            --unlock-key-file="${tik_keyfile}" \
+            --recovery-key \
+            "${TIK_CRYPT_PART}"
+    )"
+    recovery_status=$?
+    logging=true
+    [[ ${recovery_status} -eq 0 && -n "${recovery_key}" ]] ||
+        error "Could not enroll a recovery key"
+
+    tpm_enrolled=0
+    if [[ -c /dev/tpmrm0 ]]; then
+        tik_progress_step "Enrolling TPM 2.0" 40
+        if pkexec /usr/bin/systemd-cryptenroll \
+            --unlock-key-file="${tik_keyfile}" \
+            --tpm2-device=auto \
+            --tpm2-pcrs=0+7 \
+            --tpm2-pcrlock= \
+            "${TIK_CRYPT_PART}"; then
+            tpm_enrolled=1
+        else
+            d --warning --no-wrap --title="TPM enrollment failed" \
+                --text="The installation remains accessible with its passphrase and recovery key. TPM enrollment can be retried later."
+        fi
+    fi
+}
+
+finalize_target() {
+    local mapper=proto-install-root
+    local contexts policy selinux_type luks_uuid
+
+    tik_progress_step "Applying target configuration and SELinux labels" 60
+    prun /usr/sbin/cryptsetup open --key-file="${tik_keyfile}" \
+        "${TIK_CRYPT_PART}" "${mapper}"
+
+    TIK_OPENED_MAPPER="${mapper}"
+    TIK_ROOT_DEV="/dev/mapper/${mapper}"
+    TIK_ROOT_MNT=/var/lib/tik/root
+    TIK_MOUNTED_TARGET=1
+    export TIK_OPENED_MAPPER TIK_ROOT_DEV TIK_ROOT_MNT TIK_MOUNTED_TARGET
+
+    prun /usr/bin/mkdir -p "${TIK_ROOT_MNT}"
+    tik_mount "${TIK_ROOT_DEV}" "${TIK_ROOT_MNT}" "subvol=/@root" btrfs
+    tik_mount "${TIK_ROOT_DEV}" "${TIK_ROOT_MNT}/etc" "subvol=/@etc" btrfs
+
+    selinux_type="$(sed -n 's/^SELINUXTYPE=//p' /etc/selinux/config | tail -n1)"
+    selinux_type="${selinux_type:-targeted}"
+    contexts="/etc/selinux/${selinux_type}/contexts/files/file_contexts"
+    policy="$(find "/etc/selinux/${selinux_type}/policy" -maxdepth 1 \
+        -type f -name 'policy.*' -print | sort -V | tail -n1)"
+    [[ -f "${contexts}" && -f "${policy}" ]] ||
+        error "SELinux policy required to label the installation is missing"
+
+    prun /usr/sbin/setfiles -mF -c "${policy}" -r "${TIK_ROOT_MNT}" \
+        "${contexts}" "${TIK_ROOT_MNT}"
+
+    if [[ ${tpm_enrolled} -eq 1 ]]; then
+        luks_uuid="$(prun /usr/sbin/cryptsetup luksUUID "${TIK_CRYPT_PART}")"
+        prun /usr/bin/mkdir -p "${TIK_ROOT_MNT}/var/lib/proto"
+        printf '%s\n' "${luks_uuid}" |
+            prun /usr/bin/tee "${TIK_ROOT_MNT}/var/lib/proto/tpm2-rebind-needed" >/dev/null
+    fi
+}
+
+display_recovery_key() {
+    local qr
+    qr="$(qrencode "${recovery_key}" -t UTF8i)"
+    logging=false
+    d --width=600 --height=600 --no-wrap --warning \
+        --icon=security-high-symbolic \
+        --title="Encryption Recovery Key" \
+        --text="Save this recovery key in a secure location. It can unlock the system if the passphrase is lost or TPM policy changes.\n\n<b><big>${recovery_key}</big></b>\n\n<span face='monospace'>${qr}</span>"
+    logging=true
+    unset qr recovery_key
+}
+
+enroll_credentials
+finalize_target
+display_recovery_key
+tik_progress_step "Encryption configured" 100
