@@ -23,10 +23,47 @@ base64 -d "${source_dir}/mkosi.keys/obs-project.pgp.b64" \
     > "${root}/usr/lib/systemd/import-pubring.pgp"
 chmod 0644 "${root}/usr/lib/systemd/import-pubring.pgp"
 
-metainfo=${source_dir}/io.github.TobiPeterG.Proto.KDE.metainfo.xml
+case ${IMAGE_ID:?mkosi did not export IMAGE_ID} in
+    proto-gnome) metainfo=${source_dir}/io.github.TobiPeterG.Proto.GNOME.metainfo.xml ;;
+    proto-kde) metainfo=${source_dir}/io.github.TobiPeterG.Proto.KDE.metainfo.xml ;;
+    *)
+        echo "No AppStream metadata template for IMAGE_ID=${IMAGE_ID}" >&2
+        exit 1
+        ;;
+esac
 [[ -f ${metainfo} ]] || {
     echo "AppStream metadata source file not found: ${metainfo}" >&2
     exit 1
 }
-install -m 0644 "${metainfo}" \
-    "${OUTPUTDIR:?}/io.github.TobiPeterG.Proto.KDE.metainfo.xml"
+
+release_date=$(date --utc --date="@${SOURCE_DATE_EPOCH:?}" +%F)
+image_version=${IMAGE_VERSION:?mkosi did not export IMAGE_VERSION}
+image_version=$(printf '%s' "${image_version}" | sed \
+    -e 's/&/\\&amp;/g' \
+    -e 's/</\\&lt;/g' \
+    -e 's/>/\\&gt;/g' \
+    -e 's/"/\\&quot;/g' \
+    -e "s/'/\\&apos;/g")
+output=${OUTPUTDIR:?}/${IMAGE_ID}.metainfo.xml
+
+if grep -Fq "<release version=\"${image_version}\"" "${metainfo}"; then
+    install -m 0644 "${metainfo}" "${output}"
+else
+    while IFS= read -r line; do
+        printf '%s\n' "${line}"
+        if [[ ${line} == '  <releases>' ]]; then
+            printf '%s\n' \
+                "    <release version=\"${image_version}\" date=\"${release_date}\">" \
+                '      <description>' \
+                '        <p>This release includes general maintenance and package updates.</p>' \
+                '        <ul>' \
+                '          <li>Bug fixes</li>' \
+                '          <li>Performance improvements</li>' \
+                '          <li>Package updates</li>' \
+                '        </ul>' \
+                '      </description>' \
+                '    </release>'
+        fi
+    done < "${metainfo}" > "${output}"
+    chmod 0644 "${output}"
+fi

@@ -4,8 +4,8 @@ SPDX-FileCopyrightText: 2026 Proto contributors
 SPDX-License-Identifier: CC0-1.0
 -->
 <component type="operating-system">
-  <id>io.github.TobiPeterG.Proto.KDE</id>
-  <name>Proto KDE</name>
+  <id>io.github.TobiPeterG.Proto.GNOME</id>
+  <name>Proto GNOME</name>
   <summary>An image-based openSUSE Tumbleweed system with atomic updates</summary>
   <bundle type="systemd" class="sysupdate"/>
 
@@ -13,7 +13,7 @@ SPDX-License-Identifier: CC0-1.0
   <metadata_license>CC0-1.0</metadata_license>
 
   <description>
-    <p>Proto KDE is an image-based Linux operating system built from openSUSE Tumbleweed and the KDE Plasma desktop.</p>
+    <p>Proto GNOME is an image-based Linux operating system built from openSUSE Tumbleweed and the GNOME desktop.</p>
     <ul>
       <li>Read-only EROFS system image for /usr</li>
       <li>Versioned system deployments with atomic system updates</li>
@@ -33,7 +33,7 @@ SPDX-License-Identifier: CC0-1.0
   <releases>
     <release version="20260831" date="2026-08-31">
       <description>
-        <p>Proto KDE system image 20260831.</p>
+        <p>Proto GNOME system image 20260831.</p>
       </description>
     </release>
   </releases>

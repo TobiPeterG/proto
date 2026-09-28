@@ -1,4 +1,5 @@
 [Transfer]
+AppStream=https://download.opensuse.org/repositories/home:/Tobi_Peter:/proto/mkosi/%M.metainfo.xml
 ProtectVersion=%A
 Verify=yes
 
