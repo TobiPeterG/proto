@@ -69,6 +69,12 @@ cp -a /usr/etc/skel/. /etc/skel/
 # before adding any live-only users, autologin, or authorization rules. Future
 # deployments can merge or snapshot this tree without baking /etc into the
 # deployment root.
+if [[ "${IMAGE_ID}" == proto-kde ]]; then
+    # A distribution preset must not let the setup wizard replace Tik in the
+    # live session. The installed factory configuration is enabled below.
+    systemctl disable plasma-setup.service
+fi
+
 rm -rf /usr/share/factory/etc
 install -d -m 0755 /usr/share/factory/etc
 cp -a /etc/. /usr/share/factory/etc/
@@ -79,6 +85,17 @@ rm -f /usr/share/factory/etc/ssh/ssh_host_* 2>/dev/null || true
 # Snapper owns and rewrites this file. The tmpfiles definition creates it only
 # when absent, thereby preserving the list across deployments and rollbacks.
 rm -f /usr/share/factory/etc/sysconfig/snapper
+
+# Plasma Setup must run on the installed KDE system, but not on the live image
+# where Tik owns the initial session. Enable it only in the factory /etc that
+# the installer copies to the target.
+if [[ "${IMAGE_ID}" == proto-kde ]]; then
+    install -d -m 0755 \
+        /usr/share/factory/etc/systemd/system/multi-user.target.wants
+    ln -s /usr/lib/systemd/system/plasma-setup.service \
+        /usr/share/factory/etc/systemd/system/multi-user.target.wants/plasma-setup.service
+fi
+
 # Track the exact vendor-owned content. Future deployments use these hashes to
 # update untouched files and preserve administrator changes.
 /usr/lib/proto-etc-factory seed /usr/share/factory/etc
