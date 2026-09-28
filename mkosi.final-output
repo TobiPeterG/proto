@@ -1,20 +1,82 @@
 #!/usr/bin/bash
 set -euo pipefail
 
-# Run after mkosi-obs attached all signatures, installed the signed UKI and
-# reconstructed the final artifacts. The complete disk crosses the OBS stage
-# boundary as Zstd, but XZ is the sole publication format.
+# Run after mkosi-obs attached all signatures and reconstructed the final
+# artifacts. The complete disk crosses the OBS stage boundary compressed, and
+# XZ is the sole publication format.
 output_dir=${OUTPUTDIR:-${SRCDIR:?}/usr/src/packages/OTHER}
 
 shopt -s nullglob
-# Each OBS package contains one desktop image. Convert only that image's final
-# partition and disk artifacts directly to XZ without materializing another
-# raw copy.
-zstds=("${output_dir}/${IMAGE_ID}_"*.raw.zst)
-(( ${#zstds[@]} > 0 )) || {
-    echo "No final Zstd artifacts found for ${IMAGE_ID} in ${output_dir}" >&2
+
+# mkosi-obs currently installs signed UKIs only into an ESP. Proto stores UKIs
+# in XBOOTLDR, so replace the unsigned UKI there with the signed standalone
+# artifact before publishing the combined image.
+ukis=("${output_dir}/${IMAGE_ID}_"*.efi)
+(( ${#ukis[@]} == 1 )) || {
+    printf 'Expected one signed UKI for %s, found %d\n' \
+        "${IMAGE_ID}" "${#ukis[@]}" >&2
     exit 1
 }
+uki=${ukis[0]}
+disk_raw=${uki%.efi}.raw
+disk_zstd=${disk_raw}.zst
+disk_xz=${disk_raw}.xz
+disk_inputs=()
+[[ -f ${disk_zstd} ]] && disk_inputs+=("${disk_zstd}")
+[[ -f ${disk_xz} ]] && disk_inputs+=("${disk_xz}")
+(( ${#disk_inputs[@]} == 1 )) || {
+    printf 'Expected one Zstd- or XZ-compressed combined image for %s, found %d\n' \
+        "${uki}" "${#disk_inputs[@]}" >&2
+    exit 1
+}
+disk_input=${disk_inputs[0]}
+
+temporary=${disk_xz}.tmp
+verification=$(mktemp "${output_dir}/.uki-verification.XXXXXX")
+cleanup() {
+    rm -f -- "${temporary}" "${verification}" "${disk_raw}"
+}
+trap cleanup EXIT
+
+rm -f -- "${disk_raw}" "${temporary}"
+case ${disk_input} in
+    *.zst)
+        zstd --decompress --sparse --force -o "${disk_raw}" "${disk_input}"
+        ;;
+    *.xz)
+        xz --decompress --stdout "${disk_input}" | \
+            dd of="${disk_raw}" bs=16M conv=sparse status=none
+        ;;
+esac
+
+xbootldr_offset=$(systemd-repart --json=short "${disk_raw}" | jq -er '
+    [.[] | select(.type == "xbootldr") | .offset]
+    | if length == 1 then .[0]
+      else error("expected exactly one XBOOTLDR partition")
+      end
+')
+
+uki_name=$(basename "${uki}")
+printf 'Installing signed UKI %s into XBOOTLDR at offset %s\n' \
+    "${uki_name}" "${xbootldr_offset}"
+mmd -D s -i "${disk_raw}@@${xbootldr_offset}" ::EFI ::EFI/Linux || true
+mcopy -o -i "${disk_raw}@@${xbootldr_offset}" \
+    "${uki}" "::EFI/Linux/${uki_name}"
+mcopy -o -i "${disk_raw}@@${xbootldr_offset}" \
+    "::EFI/Linux/${uki_name}" "${verification}"
+cmp -- "${uki}" "${verification}"
+printf 'Verified signed UKI in XBOOTLDR byte-for-byte\n'
+
+xz --threads=0 --stdout "${disk_raw}" > "${temporary}"
+[[ ${disk_input} == "${disk_xz}" ]] || rm -f -- "${disk_input}"
+mv -f -- "${temporary}" "${disk_xz}"
+rm -f -- "${disk_raw}" "${verification}"
+trap - EXIT
+
+# Convert any remaining Zstd-compressed split partition artifacts directly to
+# XZ without materializing additional raw copies. Existing XZ artifacts need
+# no conversion.
+zstds=("${output_dir}/${IMAGE_ID}_"*.raw.zst)
 for zstd_image in "${zstds[@]}"; do
     xz_image=${zstd_image%.zst}.xz
     temporary=${xz_image}.tmp
