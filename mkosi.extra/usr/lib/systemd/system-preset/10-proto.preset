@@ -1,4 +1,20 @@
 enable ca-certificates-setup.service
-enable kde-linux-sysupdated.service
+enable NetworkManager.service
 enable proto-etc-merge.service
+enable proto-live-home.service
+enable proto-pcrlock-policy.service
+enable snapper-cleanup.timer
+enable snapper-timeline.timer
+enable systemd-pcrlock-firmware-code.service
+enable systemd-pcrlock-secureboot-authority.service
+enable systemd-pcrlock-secureboot-policy.service
+enable systemd-pcrlock-machine-id.service
+enable systemd-pcrlock-file-system.service
+enable systemd-boot-check-no-failures.service
 enable systemd-sysupdate.timer
+enable tuned.service
+enable tuned-ppd.service
+
+disable systemd-pcrlock-firmware-config.service
+disable systemd-pcrlock-make-policy.service
+disable systemd-sysupdate-notify-pcrlock.socket

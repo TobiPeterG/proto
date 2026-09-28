@@ -1,0 +1,148 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: Copyright 2024 SUSE LLC
+# SPDX-FileCopyrightText: Copyright 2024 Richard Brown
+# SPDX-FileCopyrightText: Copyright 2026 Tobias Görgens
+
+mig_dir=/var/lib/tik/mig
+homes_dir=${mig_dir}/homes
+snapshot_prefix=.tik-mig-
+home_size=0
+tik_stick_size=0
+
+clear_migration_backup() {
+    local backup
+
+    if [ -d "${homes_dir}" ]; then
+        for backup in "${homes_dir}"/*; do
+            [ -e "${backup}" ] || continue
+            prun-opt /usr/sbin/btrfs property set -f -ts "${backup}" ro false
+            prun-opt /usr/sbin/btrfs subvolume delete "${backup}"
+        done
+        prun-opt /usr/bin/rmdir "${homes_dir}"
+    fi
+
+    prun-opt /usr/bin/rm -f "${mig_dir}/passwd.out"
+    prun-opt /usr/bin/rm -f "${mig_dir}/group.out"
+    prun-opt /usr/bin/rm -f "${mig_dir}/shadow.out"
+    prun-opt /usr/bin/rm -f "${mig_dir}/subuid"
+    prun-opt /usr/bin/rm -f "${mig_dir}/subgid"
+    prun-opt /usr/bin/rm -rf "${mig_dir}/system-connections"
+    prun-opt /usr/bin/rm -rf "${mig_dir}/users"
+    prun-opt /usr/bin/rm -rf "${mig_dir}/icons"
+    prun-opt /usr/bin/rm -f "${mig_dir}/localtime"
+    prun-opt /usr/bin/rm -rf "${mig_dir}/bluetooth"
+    prun-opt /usr/bin/rm -rf "${mig_dir}/fprint"
+    prun-opt /usr/bin/rm -rf "${mig_dir}/openvpn"
+}
+
+if [ ! -d "${mig_dir}" ]; then
+    prun /usr/bin/mkdir -p "${mig_dir}"
+fi
+
+if [ -n "$(ls -A "${mig_dir}")" ]; then
+    log "[mig] existing backup found"
+    d_opt --question --no-wrap --cancel-label="No, Delete Backup"         --title="Existing user backup detected"         --text="These users can be restored to the new installation\n\nWould you like to use this backup?"
+    oldbackupyn=$?
+    log "[mig] [oldbackupyn][${oldbackupyn}]"
+    if [ "${oldbackupyn}" == 0 ]; then
+        skipbackup=1
+        migrate=1
+        log "[mig] backup skipped, migration will use existing backup"
+    else
+        clear_migration_backup
+    fi
+fi
+
+get_disk
+
+if [ -z "${skipbackup}" ]; then
+    declare -a home_subvolumes=()
+    declare -a home_names=()
+    home_list=""
+
+    tik_target_mount "tik_old_root" "optional"
+    case "$?" in
+        0) ;;
+        *)
+            log "[mig] no migratable Proto system found, skipping migration"
+            migrate=0
+            return 0
+            ;;
+    esac
+
+    if [ -d "${TIK_ROOT_MNT}/home" ]; then
+        for user_home in "${TIK_ROOT_MNT}/home"/*; do
+            [ -d "${user_home}" ] || continue
+            prun-opt /usr/sbin/btrfs subvolume show "${user_home}" >/dev/null 2>&1
+            if [ "${retval}" -eq 0 ]; then
+                home_subvolumes+=("${user_home}")
+                home_names+=("$(basename "${user_home}")")
+                home_list="${home_list}$(basename "${user_home}")\n"
+            fi
+        done
+    fi
+
+    if [ "${#home_subvolumes[@]}" -eq 0 ]; then
+        log "[mig] no per-user Btrfs home subvolumes found, migration disabled"
+        migrate=0
+    else
+        tik_progress_step "Scanning user home sizes" 15
+        for user_home in "${home_subvolumes[@]}"; do
+            subvolume_size="$(prun /usr/bin/du -sb "${user_home}" 2>/dev/null | awk '{print $1}')"
+            home_size=$((home_size + ${subvolume_size:-0}))
+        done
+
+        tik_progress_step "Checking available space" 25
+        tik_stick_size="$(prun /usr/bin/df --output=avail --block-size=1 "${mig_dir}" | awk 'NR==2 {print $1}')"
+        log "[mig] backup size check: homes=${home_size}, available=${tik_stick_size:-unknown}"
+        if [ -z "${tik_stick_size}" ] || [ "${home_size}" -gt "${tik_stick_size}" ]; then
+            log "[mig] migration disabled: insufficient or unknown backup space"
+            migrate=0
+        fi
+    fi
+
+    if [ -z "${migrate}" ]; then
+        d_opt --question --no-wrap --title="Backup users from the existing Proto install?"             --text="The following Btrfs home subvolumes will be restored:\n\n${home_list}"
+        migrateyn=$?
+        if [ "${migrateyn}" == 0 ]; then
+            migrate=1
+        else
+            migrate=0
+        fi
+    fi
+
+    if [ "${migrate}" == 1 ]; then
+        prun /usr/bin/mkdir -p "${homes_dir}"
+
+        for index in "${!home_subvolumes[@]}"; do
+            user_home="${home_subvolumes[${index}]}"
+            username="${home_names[${index}]}"
+            snapshot="${TIK_ROOT_MNT}/${snapshot_prefix}${username}"
+
+            tik_progress_step "Backing up /home/${username}" 45
+            prun /usr/sbin/btrfs subvolume snapshot -r "${user_home}" "${snapshot}"
+            (prun /usr/sbin/btrfs send "${snapshot}" |
+                pv -f -F "# %b copied in %t %r" |
+                prun /usr/sbin/btrfs receive "${homes_dir}") 2>&1 >/dev/null
+            prun /usr/sbin/btrfs subvolume delete "${snapshot}"
+        done
+
+        tik_progress_step "Exporting user/account data" 80
+        prun /usr/bin/awk -F: '($3 >= 1000 && $3 != 65534)'             "${TIK_ROOT_MNT}/etc/passwd" | prun tee "${mig_dir}/passwd.out"
+        prun /usr/bin/awk -F: '($3 >= 1000 && $3 != 65534 && $3 != 65533)'             "${TIK_ROOT_MNT}/etc/group" | prun tee "${mig_dir}/group.out"
+        prun /usr/bin/awk -F: '($3 >= 1000 && $3 != 65534) { print $1 }'             "${TIK_ROOT_MNT}/etc/passwd" |
+            prun /usr/bin/grep -F -f - "${TIK_ROOT_MNT}/etc/shadow" |
+            prun tee "${mig_dir}/shadow.out"
+        prun-opt /usr/bin/cp -a "${TIK_ROOT_MNT}/etc/subuid" "${mig_dir}/subuid"
+        prun-opt /usr/bin/cp -a "${TIK_ROOT_MNT}/etc/subgid" "${mig_dir}/subgid"
+        prun-opt /usr/bin/cp -a "${TIK_ROOT_MNT}/etc/NetworkManager/system-connections" "${mig_dir}/system-connections"
+        prun-opt /usr/bin/cp -a "${TIK_ROOT_MNT}/etc/localtime" "${mig_dir}/localtime"
+        prun-opt /usr/bin/cp -a "${TIK_ROOT_MNT}/var/lib/AccountsService/users" "${mig_dir}/users"
+        prun-opt /usr/bin/cp -a "${TIK_ROOT_MNT}/var/lib/AccountsService/icons" "${mig_dir}/icons"
+        prun-opt /usr/bin/cp -a "${TIK_ROOT_MNT}/var/lib/bluetooth" "${mig_dir}/bluetooth"
+        prun-opt /usr/bin/cp -a "${TIK_ROOT_MNT}/var/lib/fprint" "${mig_dir}/fprint"
+        prun-opt /usr/bin/cp -a "${TIK_ROOT_MNT}/etc/openvpn" "${mig_dir}/openvpn"
+
+        tik_progress_step "Migration backup prepared" 100
+    fi
+fi

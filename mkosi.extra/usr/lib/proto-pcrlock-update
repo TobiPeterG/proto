@@ -1,0 +1,54 @@
+#!/usr/bin/bash
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: Copyright 2026 Tobias Görgens
+
+set -euo pipefail
+
+pcrlock=/usr/lib/systemd/systemd-pcrlock
+policy=/var/lib/systemd/pcrlock.json
+component=/var/lib/pcrlock.d/825-cryptsetup-root.pcrlock
+
+[[ -x "${pcrlock}" && -f "${policy}" ]] || exit 0
+
+if [[ ! -f "${component}" ]]; then
+    digest="$(
+        "${pcrlock}" cel |
+            jq -er '
+                [
+                    .[]
+                    | select(.content.eventType == "volume-key")
+                    | .digests[]
+                    | select(.hashAlg == "sha256")
+                    | .digest
+                ]
+                | unique
+                | if length == 1 then
+                    .[0]
+                  else
+                    error("expected exactly one SHA-256 volume-key measurement")
+                  end
+            '
+    )"
+
+    install -d -m 0755 /var/lib/pcrlock.d
+    temporary="$(mktemp --tmpdir=/var/lib/pcrlock.d .825-cryptsetup-root.XXXXXX)"
+    trap 'rm -f "${temporary:-}"' EXIT
+    jq -cn --arg digest "${digest}" \
+        '{records: [{pcr: 15, digests: [{hashAlg: "sha256", digest: $digest}]}]}' \
+        >"${temporary}"
+    chmod 0644 "${temporary}"
+    mv -f "${temporary}" "${component}"
+    trap - EXIT
+fi
+
+prediction="$(
+    "${pcrlock}" --json=short --pcr=0 --pcr=7 --pcr=15 predict
+)"
+jq -e \
+    'any(.[][]; .pcr == 0) and any(.[][]; .pcr == 7) and any(.[][]; .pcr == 15)' \
+    <<<"${prediction}" >/dev/null
+
+"${pcrlock}" make-policy --pcr=0 --pcr=7 --pcr=15
+
+jq -e 'any(.pcrValues[]; .pcr == 0) and any(.pcrValues[]; .pcr == 7) and any(.pcrValues[]; .pcr == 15)' \
+    "${policy}" >/dev/null

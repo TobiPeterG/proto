@@ -280,6 +280,17 @@ tik_target_mount() {
     # mount root
     tik_mount_root "${TIK_ROOT_DEV}" "${TIK_ROOT_MNT}"
 
+    # Some image layouts keep mutable /etc in a separate subvolume. Mount it
+    # before assembling fstab so the normal Tik helpers see the real target.
+    if [ -n "${TIK_ETC_SUBVOLUME:-}" ] &&
+        prun-opt /usr/sbin/btrfs subvolume list "${TIK_ROOT_MNT}" |
+            grep -Fq " path ${TIK_ETC_SUBVOLUME#/}"; then
+        tik_mount "${TIK_ROOT_DEV}" "${TIK_ROOT_MNT}/etc" \
+            "subvol=/${TIK_ETC_SUBVOLUME#/}" btrfs
+    elif [ -n "${TIK_ETC_SUBVOLUME:-}" ]; then
+        log "[tik_target_mount] configured /etc subvolume ${TIK_ETC_SUBVOLUME} not found"
+    fi
+
     # Assemble fstab in a writable location
     local assembled
     assembled="$(tik_fstab_assemble "${TIK_ROOT_MNT}")"

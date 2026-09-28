@@ -37,19 +37,6 @@ else
     printf 'SELINUX=enforcing\nSELINUXTYPE=targeted\n' > /etc/selinux/config
 fi
 
-# The target starts with an empty /var and cannot rely on package-installation
-# state there. Make the essential network service explicit in /etc before the
-# factory snapshot is taken.
-systemctl enable NetworkManager.service
-systemctl enable tuned.service tuned-ppd.service
-systemctl enable snapper-timeline.timer snapper-cleanup.timer
-systemctl enable proto-etc-merge.service \
-    systemd-sysupdate.timer
-# Only bless a counted UKI after the normal boot completed without failed
-# system units. systemd-bless-boot-generator pulls in the blessing service when
-# the firmware reports that the current UKI has a boot counter.
-systemctl enable systemd-boot-check-no-failures.service
-
 # This state file is changed whenever Snapper adds a user configuration. It is
 # created by tmpfiles on installed systems and must not be reset by an image
 # update. Create the directories now so the live image is also well formed.
@@ -69,12 +56,6 @@ cp -a /usr/etc/skel/. /etc/skel/
 # before adding any live-only users, autologin, or authorization rules. Future
 # deployments can merge or snapshot this tree without baking /etc into the
 # deployment root.
-if [[ "${IMAGE_ID}" == proto-kde ]]; then
-    # A distribution preset must not let the setup wizard replace Tik in the
-    # live session. The installed factory configuration is enabled below.
-    systemctl disable plasma-setup.service
-fi
-
 rm -rf /usr/share/factory/etc
 install -d -m 0755 /usr/share/factory/etc
 cp -a /etc/. /usr/share/factory/etc/
@@ -216,29 +197,6 @@ d /home/installer/Desktop 0755 installer users -
 L+ /home/installer/.config/autostart/org.opensuse.ProtoInstaller.desktop - - - - /usr/share/applications/org.opensuse.ProtoInstaller.desktop
 L+ /home/installer/Desktop/Install\x20proto.desktop - - - - /usr/share/applications/org.opensuse.ProtoInstaller.desktop
 EOF
-
-    # CopyFiles may run in an unprivileged user namespace and cannot reliably
-    # retain a uid that only exists in the image. Complete and fix ownership of
-    # the live home at boot, after the mutable @root has been mounted. -n
-    # preserves anything that may already exist in the reusable live home.
-    cat > /etc/systemd/system/proto-live-home.service <<'EOF'
-[Unit]
-Description=Populate the proto live user home
-ConditionPathExists=/etc/proto-live
-After=local-fs.target systemd-tmpfiles-setup.service
-Before=display-manager.service
-
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/install -d -o installer -g users -m 0755 /home/installer
-ExecStart=/usr/bin/cp -a -n /etc/skel/. /home/installer/
-ExecStart=/usr/bin/chown -R installer:users /home/installer
-RemainAfterExit=yes
-
-[Install]
-WantedBy=graphical.target
-EOF
-    systemctl enable proto-live-home.service
 
     install -d -m 0755 /etc/polkit-1/rules.d
     cat > /etc/polkit-1/rules.d/51-run0-nopasswd.rules <<'EOF'

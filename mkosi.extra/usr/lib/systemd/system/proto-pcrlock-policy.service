@@ -1,0 +1,26 @@
+[Unit]
+Description=Maintain Proto TPM PCR policy
+Documentation=man:systemd-pcrlock(8)
+ConditionSecurity=measured-uki
+ConditionPathExists=/var/lib/systemd/pcrlock.json
+After=local-fs.target
+After=systemd-pcrmachine.service systemd-pcrfs-root.service
+After=systemd-pcrlock-firmware-code.service
+After=systemd-pcrlock-secureboot-policy.service
+After=systemd-pcrlock-secureboot-authority.service
+After=systemd-pcrlock-machine-id.service
+After=systemd-pcrlock-file-system.service
+Wants=systemd-pcrmachine.service systemd-pcrfs-root.service
+Requires=systemd-pcrlock-firmware-code.service
+Requires=systemd-pcrlock-secureboot-policy.service
+Requires=systemd-pcrlock-secureboot-authority.service
+Requires=systemd-pcrlock-machine-id.service
+Requires=systemd-pcrlock-file-system.service
+RequiresMountsFor=/boot /var/lib/pcrlock.d /var/lib/systemd
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/proto-pcrlock-update
+
+[Install]
+WantedBy=multi-user.target

@@ -45,8 +45,21 @@ tik_mount_prepare() {
 tik_is_root_partition() {
     local dev="$1"
     local fs
+    local metadata_dev="${dev}"
+    local partlabel
 
     [ -n "${dev}" ] || return 1
+
+    if [[ "${dev}" == /dev/mapper/* ]] && [ -n "${TIK_CRYPT_PART:-}" ]; then
+        metadata_dev="${TIK_CRYPT_PART}"
+    fi
+    if [ -n "${TIK_ROOT_PARTITION_LABEL:-}" ]; then
+        partlabel="$(lsblk -d -n -r -o PARTLABEL "${metadata_dev}" 2>/dev/null)"
+        if [ "${partlabel}" = "${TIK_ROOT_PARTITION_LABEL}" ]; then
+            echo "${dev}"
+            return 0
+        fi
+    fi
 
     for fs in btrfs ext4 xfs f2fs; do
         probe_partitions "${dev}" "${fs}" "/etc/fstab"

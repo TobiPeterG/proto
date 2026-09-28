@@ -1,22 +1,60 @@
 # SPDX-License-Identifier: MIT
 # SPDX-FileCopyrightText: Copyright 2026 Tobias Görgens
 
-find_target_partition() {
-    local label=$1
-    lsblk "${TIK_INSTALL_DEVICE}" -nrpo PATH,PARTLABEL |
-        awk -v label="${label}" '$2 == label { print $1; exit }'
+prepare_pcrlock_policy() {
+    prun-opt /usr/bin/systemd-machine-id-setup --root="${TIK_ROOT_MNT}"
+    [[ ${retval} -eq 0 ]] || return 1
+
+    prun-opt /usr/bin/chroot "${TIK_ROOT_MNT}" \
+        /usr/lib/systemd/systemd-pcrlock is-supported
+    [[ ${retval} -eq 0 ]] || return 1
+
+    prun-opt /usr/bin/chroot "${TIK_ROOT_MNT}" \
+        /usr/lib/systemd/systemd-pcrlock lock-firmware-code
+    [[ ${retval} -eq 0 ]] || return 1
+
+    prun-opt /usr/bin/chroot "${TIK_ROOT_MNT}" \
+        /usr/lib/systemd/systemd-pcrlock lock-secureboot-policy
+    [[ ${retval} -eq 0 ]] || return 1
+
+    prun-opt /usr/bin/chroot "${TIK_ROOT_MNT}" \
+        /usr/lib/systemd/systemd-pcrlock lock-secureboot-authority
+    [[ ${retval} -eq 0 ]] || return 1
+
+    prun-opt /usr/bin/chroot "${TIK_ROOT_MNT}" /usr/bin/bash -c \
+        'set -o pipefail
+         /usr/lib/systemd/systemd-pcrlock --json=short --pcr=0 --pcr=7 predict |
+             /usr/bin/jq -e '\''any(.[][]; .pcr == 0) and any(.[][]; .pcr == 7)'\'' \
+                 >/dev/null'
+    [[ ${retval} -eq 0 ]] || return 1
+
+    prun-opt /usr/bin/chroot "${TIK_ROOT_MNT}" \
+        /usr/lib/systemd/systemd-pcrlock make-policy --pcr=0 --pcr=7
+    [[ ${retval} -eq 0 ]] || return 1
+
+    prun-opt /usr/bin/chroot "${TIK_ROOT_MNT}" /usr/bin/jq -e \
+        'any(.pcrValues[]; .pcr == 0) and any(.pcrValues[]; .pcr == 7)' \
+        /var/lib/systemd/pcrlock.json
+    [[ ${retval} -eq 0 ]]
 }
 
-enroll_credentials() {
+remove_pcrlock_policy() {
+    prun-opt /usr/bin/chroot "${TIK_ROOT_MNT}" \
+        /usr/lib/systemd/systemd-pcrlock remove-policy
+}
+
+configure_encryption() {
     local pcr_public_key=/run/systemd/tpm2-pcr-public-key.pem
     local pcr_signature=/run/systemd/tpm2-pcr-signature.json
+    local pcrlock_policy="${TIK_ROOT_MNT}/var/lib/systemd/pcrlock.json"
 
-    TIK_CRYPT_PART="$(find_target_partition USER)"
-    export TIK_CRYPT_PART
+    tik_progress_step "Mounting encrypted target" 0
+    tik_target_mount "" "required"
+
     [[ -b "${TIK_CRYPT_PART}" ]] ||
         error "Could not find the encrypted USER partition on ${TIK_INSTALL_DEVICE}"
 
-    tik_progress_step "Adding disk-encryption passphrase" 5
+    tik_progress_step "Adding disk-encryption passphrase" 20
     logging=false
     if ! printf '%s' "${TIK_INSTALL_PASSPHRASE}" |
         pkexec /usr/sbin/cryptsetup luksAddKey \
@@ -30,59 +68,43 @@ enroll_credentials() {
     unset TIK_INSTALL_PASSPHRASE
     logging=true
 
-    tik_progress_step "Generating recovery key" 20
-    logging=false
-    recovery_key="$(
-        pkexec /usr/bin/systemd-cryptenroll \
-            --unlock-key-file="${tik_keyfile}" \
-            --recovery-key \
-            "${TIK_CRYPT_PART}"
-    )"
-    recovery_status=$?
-    logging=true
-    [[ ${recovery_status} -eq 0 && -n "${recovery_key}" ]] ||
-        error "Could not enroll a recovery key"
-
     if [[ -c /dev/tpmrm0 ]]; then
-        tik_progress_step "Enrolling TPM 2.0" 40
+        tik_progress_step "Binding disk encryption to TPM 2.0" 45
         if [[ ! -r "${pcr_public_key}" || ! -r "${pcr_signature}" ]]; then
             d --warning --no-wrap --title="TPM enrollment unavailable" \
-                --text="The booted image does not contain its signed PCR policy. The installation remains accessible with its passphrase and recovery key."
-        elif pkexec /usr/bin/systemd-cryptenroll \
-            --unlock-key-file="${tik_keyfile}" \
-            --tpm2-device=auto \
-            --tpm2-pcrs=7 \
-            --tpm2-public-key="${pcr_public_key}" \
-            --tpm2-public-key-pcrs=11 \
-            --tpm2-signature="${pcr_signature}" \
-            --tpm2-pcrlock= \
-            "${TIK_CRYPT_PART}"; then
-            :
+                --text="The booted image does not contain its signed PCR 11 policy. The installation remains accessible with its passphrase."
         else
-            d --warning --no-wrap --title="TPM enrollment failed" \
-                --text="The installation remains accessible with its passphrase and recovery key. TPM enrollment can be retried later."
+            if ! prepare_pcrlock_policy; then
+                remove_pcrlock_policy
+                d --warning --no-wrap --title="TPM policy setup failed" \
+                    --text="The installation remains accessible with its passphrase. TPM enrollment can be retried later."
+            else
+                prun-opt /usr/bin/systemd-cryptenroll \
+                    --unlock-key-file="${tik_keyfile}" \
+                    --tpm2-device=auto \
+                    --tpm2-pcrs= \
+                    --tpm2-public-key="${pcr_public_key}" \
+                    --tpm2-public-key-pcrs=11 \
+                    --tpm2-signature="${pcr_signature}" \
+                    --tpm2-pcrlock="${pcrlock_policy}" \
+                    "${TIK_CRYPT_PART}"
+                if [[ ${retval} -ne 0 ]]; then
+                    remove_pcrlock_policy
+                    d --warning --no-wrap --title="TPM enrollment failed" \
+                        --text="The installation remains accessible with its passphrase. TPM enrollment can be retried later."
+                fi
+            fi
         fi
+    else
+        d --warning --no-wrap --title="TPM enrollment unavailable" \
+            --text="The installation remains accessible with its passphrase, which will be required at boot."
     fi
 }
 
-finalize_target() {
-    local mapper=proto-install-root
+label_target() {
     local contexts policy selinux_type
 
-    tik_progress_step "Applying target configuration and SELinux labels" 60
-    prun /usr/sbin/cryptsetup open --key-file="${tik_keyfile}" \
-        "${TIK_CRYPT_PART}" "${mapper}"
-
-    TIK_OPENED_MAPPER="${mapper}"
-    TIK_ROOT_DEV="/dev/mapper/${mapper}"
-    TIK_ROOT_MNT=/var/lib/tik/root
-    TIK_MOUNTED_TARGET=1
-    export TIK_OPENED_MAPPER TIK_ROOT_DEV TIK_ROOT_MNT TIK_MOUNTED_TARGET
-
-    prun /usr/bin/mkdir -p "${TIK_ROOT_MNT}"
-    tik_mount "${TIK_ROOT_DEV}" "${TIK_ROOT_MNT}" "subvol=/@root" btrfs
-    tik_mount "${TIK_ROOT_DEV}" "${TIK_ROOT_MNT}/etc" "subvol=/@etc" btrfs
-
+    tik_progress_step "Applying SELinux labels" 70
     selinux_type="$(sed -n 's/^SELINUXTYPE=//p' /etc/selinux/config | tail -n1)"
     selinux_type="${selinux_type:-targeted}"
     contexts="/etc/selinux/${selinux_type}/contexts/files/file_contexts"
@@ -91,23 +113,10 @@ finalize_target() {
     [[ -f "${contexts}" && -f "${policy}" ]] ||
         error "SELinux policy required to label the installation is missing"
 
-    prun /usr/sbin/setfiles -mF -c "${policy}" -r "${TIK_ROOT_MNT}" \
+    prun /usr/sbin/setfiles -F -c "${policy}" -r "${TIK_ROOT_MNT}" \
         "${contexts}" "${TIK_ROOT_MNT}"
 }
 
-display_recovery_key() {
-    local qr
-    qr="$(qrencode "${recovery_key}" -t UTF8i)"
-    logging=false
-    d --width=600 --height=600 --no-wrap --warning \
-        --icon=security-high-symbolic \
-        --title="Encryption Recovery Key" \
-        --text="Save this recovery key in a secure location. It can unlock the system if the passphrase is lost or TPM policy changes.\n\n<b><big>${recovery_key}</big></b>\n\n<span face='monospace'>${qr}</span>"
-    logging=true
-    unset qr recovery_key
-}
-
-enroll_credentials
-finalize_target
-display_recovery_key
+configure_encryption
+label_target
 tik_progress_step "Encryption configured" 100

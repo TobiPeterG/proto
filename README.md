@@ -117,14 +117,35 @@ creates a fresh empty B slot and a fresh LUKS2-encrypted Btrfs partition. The
 latter is initialized from `/usr/share/factory/etc`; live-user autologin and
 installer authorization are not copied to the installed system.
 
-The user chooses a LUKS passphrase during installation and receives an
-independent recovery key. If a TPM 2.0 is present, the installer initially
-enrolls it against PCRs 0 and 7, which are shared between the live and
-installed boot. On the first installed boot,
-`proto-tpm2-rebind.service` replaces that temporary token with a token bound
-to PCRs 0, 4, 5, 7 and 9. The password and recovery key are never removed, so
-firmware, Secure Boot, partition-table or UKI changes can still be recovered
-from.
+The user chooses a LUKS passphrase during installation. If a TPM 2.0 is
+present and the booted OBS-signed UKI contains its signed PCR policy, Tik also
+enrolls the disk against a `systemd-pcrlock` policy for PCR 0 (firmware code)
+and PCR 7 (Secure Boot policy), as well as the UKI signing key and PCR 11.
+PCRs 1 and 2 are deliberately excluded, so firmware settings and additional
+option-ROM hardware do not normally invalidate the policy. Each signed update
+UKI carries a policy for its own PCR 11 measurement, so regular OS updates
+remain unlockable without re-enrollment.
+
+Native `systemd-pcrlock` services maintain the predicted firmware code,
+Secure Boot policy and authority, machine ID and file-system components. After
+the first installed boot, `proto-pcrlock-policy.service` adds the missing LUKS
+volume-key measurement between systemd's machine-ID and root-file-system
+components in PCR 15, then rebuilds the policy explicitly for PCRs 0, 7 and
+15. This prevents a copied partition identity from using the TPM token through
+a rogue root file system.
+New systemd/fwupd versions can therefore relax and restore the managed
+firmware-code component around a supported firmware update without replacing
+the LUKS token. Changes outside that coordinated path can require the disk
+passphrase and rebuilding the policy. No recovery key is generated; the
+passphrase remains the fallback. Tik removes its temporary installation key
+slot once post-installation modules have completed.
+
+Before erasing an existing Proto installation, Tik can preserve every direct
+`/home/<user>` Btrfs subvolume independently on the live medium and restore it
+with Btrfs send/receive. Minimal account data is retained so the restored homes
+remain usable. NetworkManager and OpenVPN configuration, timezone data,
+AccountsService profiles, Bluetooth pairings and fingerprint enrollment data
+are migrated as well when present.
 
 Installation erases the selected disk. Test the workflow with a disposable
 virtual disk before using physical hardware.
@@ -180,4 +201,4 @@ mutable `/etc/sysconfig/snapper` list is excluded from factory management.
 
 Distrobox uses Podman and crun. Container and Flatpak SELinux policies are
 part of the immutable host. Installed systems encrypt their mutable Btrfs
-state with LUKS2 and retain password, recovery-key and optional TPM2 unlocks.
+state with LUKS2 and retain passphrase and optional TPM2 unlocks.

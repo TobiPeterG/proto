@@ -1,0 +1,2 @@
+enable gdm.service
+disable display-manager-legacy.service

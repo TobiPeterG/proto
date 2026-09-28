@@ -1,0 +1,15 @@
+[Unit]
+Description=Populate the Proto live user home
+ConditionPathExists=/etc/proto-live
+After=local-fs.target systemd-tmpfiles-setup.service
+Before=display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/install -d -o installer -g users -m 0755 /home/installer
+ExecStart=/usr/bin/cp -a -n /etc/skel/. /home/installer/
+ExecStart=/usr/bin/chown -R installer:users /home/installer
+RemainAfterExit=yes
+
+[Install]
+WantedBy=graphical.target

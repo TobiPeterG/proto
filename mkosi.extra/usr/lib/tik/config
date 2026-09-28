@@ -6,6 +6,11 @@ TIK_CUSTOM_DIR="/etc/tik"
 # Default: "/usr/lib/tik/img"
 TIK_IMG_DIR="/usr/lib/tik/img"
 
+# Proto identifies its mutable root by the partition label and keeps /etc
+# in a separate Btrfs subvolume.
+TIK_ROOT_PARTITION_LABEL="USER"
+TIK_ETC_SUBVOLUME="@etc"
+
 # To show USB devices in the install device selection dialog, uncomment this variable
 # USB devices are filtered out by default
 #TIK_ALLOW_USB_INSTALL_DEVICES=1

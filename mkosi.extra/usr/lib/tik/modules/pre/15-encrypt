@@ -5,10 +5,10 @@
 
 if [[ ! -c /dev/tpmrm0 ]]; then
     d --warning --no-wrap --title="TPM 2.0 not found" \
-        --text="The installation will still be encrypted with your passphrase and a recovery key, but automatic TPM unlocking cannot be enrolled."
+        --text="The installation will still be encrypted with your passphrase, but automatic TPM unlocking cannot be enrolled; the passphrase will be required at boot."
 elif ! mokutil --sb-state 2>/dev/null | grep -q 'enabled'; then
     d --warning --no-wrap --title="Secure Boot is disabled" \
-        --text="TPM unlocking can be enrolled, but PCR 7 will record Secure Boot as disabled. Enable Secure Boot before installing if it should be part of the trusted boot policy."
+        --text="TPM enrollment records PCR 7 in its current Secure Boot-disabled state. Enabling Secure Boot later will require the disk passphrase and rebuilding the TPM policy."
 fi
 
 while true; do
