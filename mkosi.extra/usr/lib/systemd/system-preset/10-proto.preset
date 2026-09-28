@@ -11,10 +11,18 @@ enable systemd-pcrlock-secureboot-policy.service
 enable systemd-pcrlock-machine-id.service
 enable systemd-pcrlock-file-system.service
 enable systemd-boot-check-no-failures.service
-enable systemd-sysupdate.timer
+
+disable systemd-sysupdate.timer
+disable systemd-sysupdate-update.timer
+disable systemd-sysupdate-reboot.timer
 enable tuned.service
 enable tuned-ppd.service
 
 disable systemd-pcrlock-firmware-config.service
 disable systemd-pcrlock-make-policy.service
+# systemd 262 can regenerate a PCR-lock policy after sysupdate through this
+# socket. Proto currently owns policy generation because it also installs the
+# custom PCR-15 volume-key component unsupported by systemd-pcrlock itself.
+# TODO(systemd#42748): Enable this socket and remove/reduce
+# proto-pcrlock-policy.service once native volume-key locking is available.
 disable systemd-sysupdate-notify-pcrlock.socket

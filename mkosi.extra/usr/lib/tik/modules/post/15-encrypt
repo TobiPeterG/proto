@@ -21,6 +21,10 @@ prepare_pcrlock_policy() {
         /usr/lib/systemd/systemd-pcrlock lock-secureboot-authority
     [[ ${retval} -eq 0 ]] || return 1
 
+    # systemd 262 added --strict= to predict and make-policy. Until 262 is the
+    # minimum version, verify explicitly that PCR 0 and PCR 7 were not silently
+    # dropped from the generated policy.
+    # TODO(systemd>=262): Replace the jq checks with --strict=yes.
     prun-opt /usr/bin/chroot "${TIK_ROOT_MNT}" /usr/bin/bash -c \
         'set -o pipefail
          /usr/lib/systemd/systemd-pcrlock --json=short --pcr=0 --pcr=7 predict |

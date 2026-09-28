@@ -10,6 +10,11 @@ component=/var/lib/pcrlock.d/825-cryptsetup-root.pcrlock
 
 [[ -x "${pcrlock}" && -f "${policy}" ]] || exit 0
 
+# systemd-pcrlock does not synthesize a component for the
+# volume-key measurement written to PCR 15. Keep the component in /var so it is
+# tied to this encrypted installation rather than shipped in the image.
+# TODO(systemd#42748): Replace this CEL parsing with the native volume-key lock
+# command/component once systemd-pcrlock provides one.
 if [[ ! -f "${component}" ]]; then
     digest="$(
         "${pcrlock}" cel |
@@ -41,6 +46,11 @@ if [[ ! -f "${component}" ]]; then
     trap - EXIT
 fi
 
+# systemd 262 added --strict= to predict and make-policy. The explicit jq
+# checks retain compatibility with systemd 261 while ensuring none of the
+# requested PCRs are silently omitted.
+# TODO(systemd>=262): Use --strict=yes and remove both manual PCR-set checks
+# once 262 is the minimum supported version.
 prediction="$(
     "${pcrlock}" --json=short --pcr=0 --pcr=7 --pcr=15 predict
 )"

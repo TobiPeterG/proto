@@ -11,6 +11,8 @@ shopt -s nullglob
 # mkosi-obs currently installs signed UKIs only into an ESP. Proto stores UKIs
 # in XBOOTLDR, so replace the unsigned UKI there with the signed standalone
 # artifact before publishing the combined image.
+# TODO(mkosi-obs): Remove this disk rewrite when mkosi-obs detects XBOOTLDR and
+# installs the signed UKI there itself.
 ukis=("${output_dir}/${IMAGE_ID}_"*.efi)
 (( ${#ukis[@]} == 1 )) || {
     printf 'Expected one signed UKI for %s, found %d\n' \
