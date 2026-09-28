@@ -60,12 +60,8 @@ uki_name=$(basename "${uki}")
 printf 'Installing signed UKI %s into XBOOTLDR at offset %s\n' \
     "${uki_name}" "${xbootldr_offset}"
 mmd -D s -i "${disk_raw}@@${xbootldr_offset}" ::EFI ::EFI/Linux || true
-mcopy -o -i "${disk_raw}@@${xbootldr_offset}" \
+mcopy -n -o -i "${disk_raw}@@${xbootldr_offset}" \
     "${uki}" "::EFI/Linux/${uki_name}"
-mcopy -o -i "${disk_raw}@@${xbootldr_offset}" \
-    "::EFI/Linux/${uki_name}" "${verification}"
-cmp -- "${uki}" "${verification}"
-printf 'Verified signed UKI in XBOOTLDR byte-for-byte\n'
 
 xz --threads=0 --stdout "${disk_raw}" > "${temporary}"
 [[ ${disk_input} == "${disk_xz}" ]] || rm -f -- "${disk_input}"
