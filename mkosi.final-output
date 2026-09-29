@@ -29,6 +29,41 @@ BuildScripts=%D/mkosi.final-output
 RECIPE
     fi
 
+    # mkosi-obs assumes a UKI matching <name>.raw.zst belongs in that disk's
+    # ESP. Proto keeps the UKI in XBOOTLDR instead. Before a UKI-only signing
+    # round, hide the combined image behind a distinct hand-off name so the
+    # next mkosi-obs invocation does not expand the 28 GiB disk just to look
+    # for an ESP. The terminal invocation below installs the signed UKI into
+    # XBOOTLDR and restores the public image name.
+    # TODO(mkosi-obs): Remove this hand-off once mkosi-obs supports XBOOTLDR.
+    pending_entries=()
+    while IFS= read -r entry; do
+        entry=${entry#./}
+        [[ -n ${entry} && ${entry} != . ]] && pending_entries+=("${entry}")
+    done < <(cpio --quiet -it < "${output_dir}/hashes.cpio.rsasign")
+
+    uki_only=true
+    (( ${#pending_entries[@]} > 0 )) || uki_only=false
+    for entry in "${pending_entries[@]}"; do
+        [[ ${entry} == ukis/*.efi ]] || uki_only=false
+    done
+
+    if ${uki_only}; then
+        pending_ukis=("${output_dir}/${IMAGE_ID}_"*.efi)
+        if (( ${#pending_ukis[@]} == 1 )); then
+            combined_image=${pending_ukis[0]%.efi}.raw.zst
+            handoff=${combined_image%.raw.zst}.combined.raw.zst
+            if [[ -f ${combined_image} ]]; then
+                mv -f -- "${combined_image}" "${handoff}"
+                echo "Renamed combined image for UKI-only signing hand-off: ${handoff##*/}"
+            fi
+        else
+            printf 'Expected one UKI before final signing, found %d\n' \
+                "${#pending_ukis[@]}" >&2
+            exit 1
+        fi
+    fi
+
     echo "Further OBS signing round pending; deferring final UKI installation"
     exit 0
 fi
@@ -48,11 +83,13 @@ uki=${ukis[0]}
 disk_raw=${uki%.efi}.raw
 disk_zstd=${disk_raw}.zst
 disk_xz=${disk_raw}.xz
+disk_handoff=${disk_raw%.raw}.combined.raw.zst
 disk_inputs=()
 [[ -f ${disk_zstd} ]] && disk_inputs+=("${disk_zstd}")
 [[ -f ${disk_xz} ]] && disk_inputs+=("${disk_xz}")
+[[ -f ${disk_handoff} ]] && disk_inputs+=("${disk_handoff}")
 (( ${#disk_inputs[@]} == 1 )) || {
-    printf 'Expected one Zstd- or XZ-compressed combined image for %s, found %d\n' \
+    printf 'Expected one compressed combined image for %s, found %d\n' \
         "${uki}" "${#disk_inputs[@]}" >&2
     exit 1
 }
