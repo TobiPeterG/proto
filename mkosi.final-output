@@ -1,12 +1,37 @@
 #!/usr/bin/bash
 set -euo pipefail
 
-# Run after mkosi-obs attached all signatures and reconstructed the final
-# artifacts. The complete disk crosses the OBS stage boundary compressed, and
-# XZ is the sole publication format.
+# Run after each mkosi-obs signing round. The complete disk crosses OBS stage
+# boundaries compressed; once all signing rounds are complete, XZ is the sole
+# publication format.
 output_dir=${OUTPUTDIR:-${SRCDIR:?}/usr/src/packages/OTHER}
 
 shopt -s nullglob
+
+# Attaching signed PCR policies changes the UKI and consequently requires a
+# further OBS signing round for the resulting PE image. mkosi-obs carries its
+# generated recipe forward in that case, but not additional scripts referenced
+# by the recipe. Defer all final processing and carry this script forward until
+# the terminal signing round has produced the final Secure Boot-signed UKI.
+if [[ -f ${output_dir}/hashes.cpio.rsasign ]]; then
+    recipe=${output_dir}/mkosi.conf
+    [[ -f ${recipe} ]] || {
+        echo "mkosi-obs requested another signing round without a recipe" >&2
+        exit 1
+    }
+
+    install -m 0755 "${BASH_SOURCE[0]}" "${output_dir}/mkosi.final-output"
+    if ! grep -Fxq 'BuildScripts=%D/mkosi.final-output' "${recipe}"; then
+        cat >> "${recipe}" <<'RECIPE'
+
+[Content]
+BuildScripts=%D/mkosi.final-output
+RECIPE
+    fi
+
+    echo "Further OBS signing round pending; deferring final UKI installation"
+    exit 0
+fi
 
 # mkosi-obs currently installs signed UKIs only into an ESP. Proto stores UKIs
 # in XBOOTLDR, so replace the unsigned UKI there with the signed standalone
@@ -34,9 +59,8 @@ disk_inputs=()
 disk_input=${disk_inputs[0]}
 
 temporary=${disk_xz}.tmp
-verification=$(mktemp "${output_dir}/.uki-verification.XXXXXX")
 cleanup() {
-    rm -f -- "${temporary}" "${verification}" "${disk_raw}"
+    rm -f -- "${temporary}" "${disk_raw}"
 }
 trap cleanup EXIT
 
@@ -68,7 +92,7 @@ mcopy -n -o -i "${disk_raw}@@${xbootldr_offset}" \
 xz --threads=0 --stdout "${disk_raw}" > "${temporary}"
 [[ ${disk_input} == "${disk_xz}" ]] || rm -f -- "${disk_input}"
 mv -f -- "${temporary}" "${disk_xz}"
-rm -f -- "${disk_raw}" "${verification}"
+rm -f -- "${disk_raw}"
 trap - EXIT
 
 # Convert any remaining Zstd-compressed split partition artifacts directly to
