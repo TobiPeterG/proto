@@ -140,6 +140,16 @@ EOF
     usermod --append --groups wheel installer
     passwd --delete installer
 
+    # openSUSE patches both GDM and SDDM to consume the common display-manager
+    # sysconfig. Keep it in sync with the native per-DM configuration below;
+    # in particular, SDDM's PAM setup uses the password-less-login setting.
+    if [[ -f /etc/sysconfig/displaymanager ]]; then
+        sed -i \
+            -e 's/^DISPLAYMANAGER_AUTOLOGIN=.*/DISPLAYMANAGER_AUTOLOGIN="installer"/' \
+            -e 's/^DISPLAYMANAGER_PASSWORD_LESS_LOGIN=.*/DISPLAYMANAGER_PASSWORD_LESS_LOGIN="yes"/' \
+            /etc/sysconfig/displaymanager
+    fi
+
     if [[ "${IMAGE_ID}" == proto-gnome ]]; then
         install -d -m 0755 /etc/gdm
         cat > /etc/gdm/custom.conf <<'EOF'
@@ -147,13 +157,6 @@ EOF
 AutomaticLoginEnable=True
 AutomaticLogin=installer
 EOF
-        if [[ -f /etc/sysconfig/displaymanager ]]; then
-            sed -i \
-                -e 's/^DISPLAYMANAGER_AUTOLOGIN=.*/DISPLAYMANAGER_AUTOLOGIN="installer"/' \
-                -e 's/^DISPLAYMANAGER_PASSWORD_LESS_LOGIN=.*/DISPLAYMANAGER_PASSWORD_LESS_LOGIN="yes"/' \
-                /etc/sysconfig/displaymanager
-        fi
-
         # A passwordless live account must never reach a lock screen it cannot
         # unlock. These dconf defaults are live-only because the factory /etc
         # snapshot was taken above.
@@ -183,7 +186,7 @@ EOF
         cat > /etc/sddm.conf.d/10-proto-live.conf <<'EOF'
 [Autologin]
 User=installer
-Session=plasmawayland
+Session=plasma.desktop
 EOF
 
     fi
