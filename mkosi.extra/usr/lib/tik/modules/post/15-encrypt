@@ -1,6 +1,13 @@
 # SPDX-License-Identifier: MIT
 # SPDX-FileCopyrightText: Copyright 2026 Tobias Görgens
 
+# TODO(firstboot-root, systemd>=262): This is the current installation-time
+# provisioning path. Once the installed initrd creates USER on first boot,
+# move passphrase/recovery-key enrollment there and run the TPM part only after
+# the machine-local PCR-lock policy, including the PCR-15 volume-key component,
+# can be generated. Enrollment must be failure-atomic: keep boot blocked until
+# a tested user credential exists and the temporary repart keyslot is gone.
+
 prepare_pcrlock_policy() {
     prun-opt /usr/bin/systemd-machine-id-setup --root="${TIK_ROOT_MNT}"
     [[ ${retval} -eq 0 ]] || return 1

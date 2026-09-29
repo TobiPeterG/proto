@@ -150,6 +150,27 @@ are migrated as well when present.
 Installation erases the selected disk. Test the workflow with a disposable
 virtual disk before using physical hardware.
 
+### Future installer instantiation
+
+The installed system should continue to ship repart definitions for both A/B
+slots, but the downloadable installer image does not need to allocate its empty
+B `/usr`, Verity and Verity-signature partitions. A future split between the
+reduced build/live layout and Tik's complete target layout should let
+`systemd-repart` create those empty partitions only on the destination disk.
+This mostly reduces the nominal and temporary raw-image size because empty
+partitions already compress well.
+
+Ultimately Tik could deploy only the authenticated boot and A-partition set.
+On the first installed boot, initrd `systemd-repart` would create the encrypted
+Btrfs USER partition, and a mandatory first-boot enrollment step would collect
+a user passphrase or display a generated recovery key. It must verify the new
+credential and remove the bootstrap key before allowing switch-root. Only
+after the new filesystem and its PCR-15 volume-key measurement exist should
+Proto generate its machine-local PCR-lock policy and enroll the TPM for PCR 0,
+PCR 7, the signed PCR-11 policy and PCR 15. systemd 262's
+`systemd-cryptenroll-firstboot.service` provides most of the UI and ordering,
+but its optional/failure-tolerant policy needs a stricter Proto integration.
+
 ## Updates and rollback
 
 The native transfer definitions under `/usr/lib/sysupdate.d` use:
