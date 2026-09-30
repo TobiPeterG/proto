@@ -67,16 +67,6 @@ rm -f /usr/share/factory/etc/ssh/ssh_host_* 2>/dev/null || true
 # when absent, thereby preserving the list across deployments and rollbacks.
 rm -f /usr/share/factory/etc/sysconfig/snapper
 
-# Plasma Setup must run on the installed KDE system, but not on the live image
-# where Tik owns the initial session. Enable it only in the factory /etc that
-# the installer copies to the target.
-if [[ "${IMAGE_ID}" == proto-kde ]]; then
-    install -d -m 0755 \
-        /usr/share/factory/etc/systemd/system/multi-user.target.wants
-    ln -s /usr/lib/systemd/system/plasma-setup.service \
-        /usr/share/factory/etc/systemd/system/multi-user.target.wants/plasma-setup.service
-fi
-
 # Track the exact vendor-owned content. Future deployments use these hashes to
 # update untouched files and preserve administrator changes.
 /usr/lib/proto-etc-factory seed /usr/share/factory/etc
@@ -188,6 +178,12 @@ EOF
 User=installer
 Session=plasma.desktop
 EOF
+
+        # Plasma Setup is enabled in the vendor preset so that first-boot
+        # preset processing cannot disable it on an installed system. The
+        # factory /etc snapshot above intentionally does not contain this
+        # completion marker; it is live-media-only.
+        : > /etc/plasma-setup-done
 
     fi
 
