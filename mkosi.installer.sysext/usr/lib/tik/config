@@ -1,0 +1,29 @@
+# Directory for users to add custom configuration and modules
+# Default: "/etc/tik"
+TIK_CUSTOM_DIR="/etc/tik"
+
+# TIK installs the system with systemd-sysinstall.
+TIK_ROOT_PARTITION_LABEL="USER"
+TIK_ETC_SUBVOLUME="@etc"
+
+# The live medium must never be offered as an installation target. Deriving
+# its backing disk from the active mounts is authoritative; this label remains
+# a fallback for media built by TIK or older layouts.
+TIK_INSTALL_MEDIA_LABEL="TIKINSTALL"
+TIK_BIND_LIVE_USR=1
+
+# To show USB devices in the install device selection dialog, uncomment this variable
+# USB devices are filtered out by default
+#TIK_ALLOW_USB_INSTALL_DEVICES=1
+
+# For unattended installations the disk device to deploy the image must be defined
+# Default: Undefined
+#TIK_INSTALL_DEVICE=""
+
+# Display name of the OS to be deployed by tik
+# Default: Undefined
+#TIK_OS_NAME=""
+
+# URL for bug reports to go to
+# Default: https://aeondesktop.org/reportbug
+TIK_BUG_URL="https://github.com/TobiPeterG/sys-proto/issues"

@@ -1,0 +1,29 @@
+#!/usr/bin/bash
+set -euo pipefail
+
+definitions=/usr/lib/proto-installer-repart.d
+device_file=/run/proto-installer-state-device
+source=
+for mountpoint in /sysusr/usr /sysroot/usr; do
+    source="$(findmnt -nro SOURCE --target "${mountpoint}" 2>/dev/null || true)"
+    [[ -n ${source} ]] && break
+done
+source="${source%%\[*}"
+[[ -n ${source} ]] || { echo 'proto installer: cannot find live /usr device' >&2; exit 0; }
+
+disk="$(lsblk -snrpo PATH,TYPE "${source}" | awk '$2 == "disk" { print $1; exit }')"
+[[ -b ${disk} ]] || { echo "proto installer: cannot resolve live disk for ${source}" >&2; exit 0; }
+
+# A freshly flashed image usually has unallocated space after its A-only
+# partitions. Failure is non-fatal: installation still works, but migration is
+# disabled by TIK's normal free-space check.
+if ! systemd-repart --no-pager --pretty=no --dry-run=no \
+        --definitions="${definitions}" "${disk}"; then
+    echo "proto installer: no persistent migration space available on ${disk}" >&2
+    exit 0
+fi
+
+udevadm settle --timeout=60
+state="$(lsblk -nrpo PATH,LABEL "${disk}" | awk '$2 == "TIKSTATE" { print $1; exit }')"
+[[ -b ${state} ]] || { echo 'proto installer: TIKSTATE was not created' >&2; exit 0; }
+printf '%s\n' "${state}" >"${device_file}"

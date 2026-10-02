@@ -1,0 +1,10 @@
+[Unit]
+Description=Create persistent proto installer migration space
+DefaultDependencies=no
+ConditionKernelCommandLine=systemd.volatile=yes
+After=initrd-usr-fs.target
+Before=proto-installer-prepare-root.service initrd-root-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/proto-installer-state

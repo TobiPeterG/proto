@@ -1,0 +1,16 @@
+#!/usr/bin/bash
+# SPDX-License-Identifier: MIT
+set -euo pipefail
+
+[[ -e /etc/initrd-release ]] || exit 0
+case " $(</proc/cmdline) " in
+    *' systemd.volatile=yes '*|*' root=tmpfs '*) exit 0 ;;
+esac
+
+# No dependency on USER mounts is pulled into the volatile live environment.
+# Installed boots must mount their versioned /etc before switching root.
+for unit in initrd-parse-etc.service initrd-switch-root.target; do
+    install -d -m 0755 "${1}/${unit}.requires"
+    ln -sf /usr/lib/systemd/system/sysroot-etc.mount \
+        "${1}/${unit}.requires/sysroot-etc.mount"
+done

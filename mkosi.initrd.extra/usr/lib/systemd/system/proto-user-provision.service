@@ -1,0 +1,13 @@
+[Unit]
+Description=Provision the encrypted Proto USER partition
+DefaultDependencies=no
+ConditionKernelCommandLine=!systemd.volatile=yes
+ConditionPathExists=/run/proto-user-provision.required
+Requires=systemd-repart.service
+After=systemd-repart.service systemd-udev-settle.service initrd-usr-fs.target
+Before=initrd-root-fs.target sysroot.mount initrd-switch-root.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/proto-user-provision enroll

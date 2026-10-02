@@ -1,0 +1,19 @@
+#!/usr/bin/bash
+set -euo pipefail
+
+factory=/sysroot/usr/share/factory/etc
+[[ -d ${factory} ]] || {
+    echo "proto installer: vendor /etc is missing from /usr" >&2
+    exit 1
+}
+
+install -d -m 0755 /sysroot/etc /sysroot/var/lib/confexts
+install -d -m 0700 /sysroot/var/lib/tik
+if [[ -s /run/proto-installer-state-device ]]; then
+    state="$(</run/proto-installer-state-device)"
+    mount -t btrfs -o compress=zstd:1 "${state}" /sysroot/var/lib/tik
+fi
+cp -a "${factory}/." /sysroot/etc/
+install -d -m 0755 /sysroot/etc/extensions
+install -m 0644 /proto-installer/sysext/*.raw /sysroot/etc/extensions/
+install -m 0644 /proto-installer/confext/*.raw /sysroot/var/lib/confexts/

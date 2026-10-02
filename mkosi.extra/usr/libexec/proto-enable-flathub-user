@@ -1,0 +1,20 @@
+#!/usr/bin/bash
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: Copyright 2026 Tobias Görgens
+
+set -u
+
+autostart="${XDG_CONFIG_HOME:-${HOME}/.config}/autostart/proto-enable-flathub.desktop"
+remote=https://dl.flathub.org/repo/flathub.flatpakrepo
+
+# NetworkManager and the desktop session may become ready in either order.
+# Keep the autostart entry when offline so the next login retries naturally.
+for attempt in {1..12}; do
+    if flatpak remote-add --user --if-not-exists flathub "${remote}"; then
+        rm -f -- "${autostart}"
+        exit 0
+    fi
+    sleep 10
+done
+
+exit 1

@@ -1,6 +1,5 @@
 enable ca-certificates-setup.service
 enable NetworkManager.service
-enable proto-etc-merge.service
 enable proto-live-home.service
 enable proto-pcrlock-policy.service
 enable snapper-cleanup.timer
