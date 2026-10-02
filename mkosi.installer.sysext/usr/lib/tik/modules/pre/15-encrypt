@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: Copyright 2026 Tobias Görgens
+
+[[ -e /etc/proto-live ]] || error "Installation is only supported from proto live media"
+# Define the prompt before migration; 20-mig calls it after its decision.
+# No migrated users means USER provisioning is deferred to first boot.
+tik_collect_install_passphrase() {
+    if [[ ! -c /dev/tpmrm0 ]]; then
+        d --warning --no-wrap --title="TPM 2.0 not found" \
+            --text="The installation will still be encrypted with your passphrase, but automatic TPM unlocking cannot be enrolled; the passphrase will be required at boot."
+    fi
+
+    while true; do
+        TIK_INSTALL_PASSPHRASE="$(tik_prompt_passphrase "Set disk-encryption passphrase" "Cancel Installation")"
+        prompt_retval=$?
+        if [[ ${prompt_retval} -ne 0 ]]; then
+            error "Disk-encryption passphrase setup was cancelled"
+        fi
+
+        if [[ ${#TIK_INSTALL_PASSPHRASE} -lt 8 ]]; then
+            d --warning --no-wrap --title="Passphrase too short" \
+                --text="Use at least eight characters."
+            continue
+        fi
+
+        passphrase_check="$(tik_prompt_passphrase "Repeat disk-encryption passphrase" "Cancel Installation")"
+        prompt_retval=$?
+        if [[ ${prompt_retval} -ne 0 ]]; then
+            unset passphrase_check TIK_INSTALL_PASSPHRASE
+            error "Disk-encryption passphrase setup was cancelled"
+        fi
+
+        if [[ "${TIK_INSTALL_PASSPHRASE}" != "${passphrase_check}" ]]; then
+            unset passphrase_check
+            TIK_INSTALL_PASSPHRASE=""
+            d --warning --no-wrap --title="Passphrases do not match" \
+                --text="Please try again."
+            continue
+        fi
+
+        unset passphrase_check
+        break
+    done
+
+    log "[encrypt] User passphrase collected without logging it"
+}

@@ -1,0 +1,146 @@
+#!/usr/bin/bash
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: Copyright 2026 Tobias Görgens
+
+set -euo pipefail
+
+tik_secure_boot_enabled() {
+    local state
+    state="$(LC_ALL=C mokutil --sb-state 2>/dev/null)" || return 1
+    grep -Fxq 'SecureBoot enabled' <<<"${state}" &&
+        ! grep -qi 'validation is disabled' <<<"${state}"
+}
+
+tik_sysinstall_assert_target() {
+    local disk=$1 mountpoint source
+    [[ -b ${disk} && $(lsblk -dnro TYPE "${disk}") == disk ]] || return 1
+    for mountpoint in / /usr /boot /efi; do
+        source="$(findmnt -nro SOURCE --target "${mountpoint}" 2>/dev/null || true)"
+        source="${source%%\[*}"
+        [[ -b ${source} ]] || continue
+        if lsblk -snrpo PATH "${source}" | grep -Fxq -- "${disk}"; then
+            echo "Refusing to overwrite the running system's disk: ${disk}" >&2
+            return 1
+        fi
+    done
+}
+
+tik_sysinstall_deploy() {
+    local disk=$1 migration=$2 keyfile=$3
+
+    # sysinstall 261 defers Format=empty and FactoryReset=yes partitions.
+    # This copies the authenticated A set and installs the running UKI, using
+    # the canonical definitions; no raw image or second layout is needed.
+    systemd-sysinstall --definitions=/usr/lib/repart.d \
+        --erase=yes --confirm=no --welcome=no --summary=no --chrome=no \
+        --variables=no --reboot=no \
+        --copy-locale=no --copy-keymap=no --copy-timezone=no "${disk}"
+
+    # Only migration needs USER (and the complete layout) before first boot.
+    # Without migration the installed initrd's repart creates both B and USER.
+    # sysinstall currently has no key-file/defer override for this operation.
+    # TODO(systemd-sysinstall): Fold this completion step into sysinstall when
+    # it can provision a FactoryReset USER partition with a caller-supplied key.
+    if [[ ${migration} == 1 ]]; then
+        systemd-repart --no-pager --pretty=no --empty=allow --dry-run=no \
+            --definitions=/usr/lib/repart.d --copy-source=/ \
+            --key-file="${keyfile}" "${disk}"
+    fi
+    udevadm settle --timeout=60
+}
+
+tik_sysinstall_finish_boot() (
+    local disk=$1 work esp xboot entry uki
+    esp="$(lsblk -nrpo PATH,PARTTYPE "${disk}" |
+        awk 'tolower($2) == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" {print $1; exit}')"
+    xboot="$(lsblk -nrpo PATH,PARTTYPE "${disk}" |
+        awk 'tolower($2) == "bc13c2ff-59e6-4262-a352-b275fd6f7172" {print $1; exit}')"
+    [[ -b ${esp} && -b ${xboot} ]] || return 1
+    work="$(mktemp -d /run/tik-sysinstall.XXXXXXXX)"
+    cleanup() {
+        local result=$?
+        trap - EXIT
+        if mountpoint -q "${work}/boot"; then
+            umount "${work}/boot" || result=1
+        fi
+        if mountpoint -q "${work}/efi"; then
+            umount "${work}/efi" || result=1
+        fi
+        rmdir "${work}/boot" "${work}/efi" "${work}" 2>/dev/null || true
+        exit "${result}"
+    }
+    trap cleanup EXIT
+    mkdir "${work}/efi" "${work}/boot"
+    mount -t vfat -o rw "${esp}" "${work}/efi"
+    mount -t vfat -o rw "${xboot}" "${work}/boot"
+
+    # sysinstall's bootctl installs /usr's vendor binary, not OBS's signed
+    # copy, and would bypass shim. Restore the already signed live ESP chain.
+    # TODO(systemd-sysinstall): Use native shim/signed-loader installation once
+    # supported. --variables=no keeps registration in TIK's shim-aware path.
+    [[ -f /efi/EFI/BOOT/BOOTX64.EFI && -f /efi/EFI/BOOT/grub.EFI &&
+       -f /efi/EFI/systemd/systemd-bootx64.efi ]] || return 1
+    cp -r /efi/EFI/. "${work}/efi/EFI/"
+    cp /efi/loader/loader.conf "${work}/efi/loader/loader.conf"
+
+    # sysinstall also links a duplicate UKI as a type-1 entry. Proto's native
+    # sysupdate transfer manages type-2 entries in EFI/Linux. Unlink only the
+    # duplicates whose canonical UKI exists; do not retain a stale boot entry
+    # outside sysupdate's version/boot-counting lifecycle.
+    shopt -s nullglob
+    for entry in "${work}/boot/loader/entries/"*.conf; do
+        uki="$(awk '$1 == "uki" { print $2; exit }' "${entry}")"
+        [[ -n ${uki} && ${uki} != /EFI/Linux/* &&
+           -f ${work}/boot/EFI/Linux/${uki##*/} ]] || continue
+        bootctl --esp-path="${work}/efi" --boot-path="${work}/boot" \
+            --no-variables unlink "${entry##*/}"
+    done
+    [[ -n $(find "${work}/boot/EFI/Linux" -maxdepth 1 -type f -name '*.efi' -print -quit) ]] || return 1
+    # Only the installer role disappears; other companions remain untouched.
+    find "${work}/boot/EFI/Linux" -mindepth 2 -maxdepth 2 -type f \
+        -path '*.efi.extra.d/10-proto-installer.addon.efi' -delete
+    find "${work}/boot/EFI/Linux" -mindepth 1 -maxdepth 1 -type d \
+        -name '*.efi.extra.d' -empty -delete
+    sync -f "${work}/boot"
+    sync -f "${work}/efi"
+)
+
+tik_sysinstall_worker() {
+    # CopyBlocks=auto requires the real /usr block device, not sysext's overlay.
+    # This runs only in our private mount namespace, leaving the live desktop
+    # and its installer extension merged in the parent's namespace. All helper
+    # functions have already been sourced before their sysext disappears here.
+    systemd-sysext --no-reload unmerge
+    tik_sysinstall_deploy "$@"
+    tik_sysinstall_finish_boot "$1"
+}
+
+tik_sysinstall_main() {
+    if [[ ${1:-} == --check-secure-boot && $# == 1 ]]; then
+        tik_secure_boot_enabled
+        return
+    fi
+    [[ $# == 3 && ${EUID} == 0 && -e /etc/proto-live ]] || return 1
+    tik_secure_boot_enabled || {
+        echo 'Installation requires Secure Boot with shim validation enabled.' >&2
+        return 1
+    }
+    local disk migration=$2 keyfile=$3
+    disk="$(readlink -f -- "$1")"
+    [[ ${migration} == 0 || ${migration} == 1 ]] || return 1
+    tik_sysinstall_assert_target "${disk}"
+    command -v systemd-sysinstall >/dev/null
+    if [[ ${migration} == 1 ]]; then
+        [[ -f ${keyfile} && ! -L ${keyfile} &&
+           $(stat -c '%u:%a' "${keyfile}") == 0:400 ]] || return 1
+    else
+        [[ -z ${keyfile} ]] || return 1
+    fi
+    unshare --mount --propagation=private /usr/bin/bash -c \
+        'source "$1"; shift; tik_sysinstall_worker "$@"' \
+        bash "${BASH_SOURCE[0]}" "${disk}" "${migration}" "${keyfile}"
+}
+
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+    tik_sysinstall_main "$@"
+fi

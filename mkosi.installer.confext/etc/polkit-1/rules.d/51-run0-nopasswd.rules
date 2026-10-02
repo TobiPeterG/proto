@@ -1,0 +1,1 @@
+polkit._run0_nopasswd.push("installer");

@@ -1,0 +1,152 @@
+#!/usr/bin/bash
+set -euo pipefail
+
+key=/run/proto-user-provision.key
+marker=/run/proto-user-provision.required
+reset_marker=/run/proto-user-provision.reset-incomplete
+mapper=root
+target=
+
+cleanup_failed_enrollment() {
+    local status=$? path
+    trap - EXIT
+    [[ ${status} -eq 0 ]] && exit 0
+
+    unset first second 2>/dev/null || true
+    if [[ -n ${target:-} ]]; then
+        for path in sys run proc dev; do
+            umount -R "${target}/${path}" 2>/dev/null || true
+        done
+        umount "${target}/boot" 2>/dev/null || true
+        umount "${target}/usr" 2>/dev/null || true
+        umount "${target}/etc" 2>/dev/null || true
+        umount "${target}" 2>/dev/null || true
+    fi
+    systemd-cryptsetup detach "${mapper}" 2>/dev/null ||
+        cryptsetup close "${mapper}" 2>/dev/null || true
+    echo "proto: USER provisioning failed; temporary mounts and mapper were cleaned up" >&2
+    exit "${status}"
+}
+
+root_device() {
+    local candidate
+    for candidate in /dev/gpt-auto-root /dev/disk/by-designator/root; do
+        [[ -b ${candidate} ]] && { readlink -f -- "${candidate}"; return 0; }
+    done
+    return 1
+}
+
+case ${1:?prepare or enroll required} in
+prepare)
+    umask 0077
+    dd if=/dev/urandom of="${key}" bs=64 count=1 status=none
+    if ! root_device >/dev/null; then
+        : >"${marker}"
+    else
+        device="$(root_device)"
+        # repart creates the ephemeral bootstrap credential in slot zero.
+        # Its presence on a later boot means provisioning was interrupted
+        # before the human credential was verified and the slot was removed.
+        # USER contains no user data at this point, so recreate it atomically
+        # with this boot's new in-memory key instead of leaving it locked.
+        if cryptsetup luksDump --dump-json-metadata "${device}" 2>/dev/null |
+                jq -e '.keyslots["0"] != null' >/dev/null; then
+            : >"${reset_marker}"
+            : >"${marker}"
+        fi
+    fi
+    ;;
+enroll)
+    [[ -e ${marker} ]] || exit 0
+    trap cleanup_failed_enrollment EXIT
+    udevadm settle --timeout=60
+    device="$(root_device)" || { echo 'proto: repart did not create USER' >&2; exit 1; }
+
+    while true; do
+        first="$(systemd-ask-password --timeout=0 'Set the disk-encryption passphrase:')"
+        [[ ${#first} -ge 8 ]] || { echo 'Passphrase must have at least eight characters.' >&2; continue; }
+        second="$(systemd-ask-password --timeout=0 'Repeat the disk-encryption passphrase:')"
+        [[ ${first} == "${second}" ]] && break
+        unset first second
+        echo 'Passphrases do not match.' >&2
+    done
+
+    systemd-cryptsetup attach "${mapper}" "${device}" "${key}" 'tpm2-measure-pcr=yes'
+    printf %s "${first}" | cryptsetup luksAddKey --key-file="${key}" \
+        --new-keyfile=- --force-password "${device}"
+    printf %s "${first}" | cryptsetup open --test-passphrase --key-file=- "${device}"
+    unset first second
+
+    if [[ -d /sysusr/usr ]]; then
+        system_usr=/sysusr/usr
+    elif [[ -d /sysroot/usr ]]; then
+        system_usr=/sysroot/usr
+    else
+        echo "proto: authenticated /usr is unavailable for enrollment" >&2
+        exit 1
+    fi
+
+    target=/run/proto-user-target
+    install -d -m 0755 "${target}"
+    mount -t btrfs -o subvol=/@root /dev/mapper/${mapper} "${target}"
+    install -d -m 0755 "${target}/etc" "${target}/usr" "${target}/boot"
+    mount -t btrfs -o subvol=/@etc /dev/mapper/${mapper} "${target}/etc"
+    mount --bind "${system_usr}" "${target}/usr"
+    mount -o remount,bind,ro "${target}/usr"
+
+    xboot=
+    for candidate in /dev/gpt-auto-xbootldr /dev/disk/by-designator/xbootldr; do
+        if [[ -b ${candidate} ]]; then xboot="$(readlink -f -- "${candidate}")"; break; fi
+    done
+    [[ -n ${xboot} ]] && mount -t vfat -o rw "${xboot}" "${target}/boot"
+    for path in dev proc run sys; do
+        install -d -m 0755 "${target}/${path}"
+        mount --rbind "/${path}" "${target}/${path}"
+    done
+
+    systemd-machine-id-setup --root="${target}"
+    pcrlock="${target}/usr/lib/systemd/systemd-pcrlock"
+    if [[ -c /dev/tpmrm0 && -x ${pcrlock} && \
+          -r /run/systemd/tpm2-pcr-public-key.pem && \
+          -r /run/systemd/tpm2-pcr-signature.json ]]; then
+        if chroot "${target}" /usr/lib/systemd/systemd-pcrlock lock-firmware-code &&
+           chroot "${target}" /usr/lib/systemd/systemd-pcrlock lock-secureboot-policy &&
+           chroot "${target}" /usr/lib/systemd/systemd-pcrlock lock-secureboot-authority &&
+           chroot "${target}" /usr/lib/systemd/systemd-pcrlock make-policy --pcr=0 --pcr=7 &&
+           chroot "${target}" /usr/lib/proto-pcrlock-update; then
+            pcrlock_ready=yes
+        else
+            pcrlock_ready=no
+            echo 'proto: TPM policy setup failed; retaining passphrase access' >&2
+        fi
+        if [[ ${pcrlock_ready} == yes ]] && systemd-cryptenroll --unlock-key-file="${key}" \
+            --tpm2-device=auto --tpm2-pcrs= \
+            --tpm2-public-key=/run/systemd/tpm2-pcr-public-key.pem \
+            --tpm2-public-key-pcrs=11 \
+            --tpm2-signature=/run/systemd/tpm2-pcr-signature.json \
+            --tpm2-pcrlock="${target}/var/lib/systemd/pcrlock.json" \
+            "${device}"; then
+            cryptsetup open --test-passphrase --token-only "${device}" ||
+                echo 'proto: TPM token could not be verified; retaining passphrase access' >&2
+        else
+            echo 'proto: TPM enrollment failed; retaining passphrase access' >&2
+        fi
+    fi
+
+    for path in sys run proc dev; do umount -R "${target}/${path}" 2>/dev/null || true; done
+    umount "${target}/boot" 2>/dev/null || true
+    umount "${target}/usr" 2>/dev/null || true
+    umount "${target}/etc"
+    umount "${target}"
+
+    # Slot zero is the one created by systemd-repart for the bootstrap key.
+    # The verified user passphrase and, when available, TPM token remain.
+    systemd-cryptenroll --unlock-key-file="${key}" --wipe-slot=0 "${device}"
+    trap - EXIT
+    rm -f -- "${key}" "${marker}" "${reset_marker}"
+    ;;
+*)
+    echo "Unknown operation: $1" >&2
+    exit 2
+    ;;
+esac

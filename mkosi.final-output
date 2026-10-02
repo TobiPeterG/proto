@@ -126,6 +126,20 @@ mmd -D s -i "${disk_raw}@@${xbootldr_offset}" ::EFI ::EFI/Linux || true
 mcopy -n -o -i "${disk_raw}@@${xbootldr_offset}" \
     "${uki}" "::EFI/Linux/${uki_name}"
 
+installer_addon="${output_dir}/${IMAGE_ID}-installer.addon.efi"
+[[ -f ${installer_addon} ]] || {
+    echo "Signed installer add-on not found: ${installer_addon}" >&2
+    exit 1
+}
+addon_directory="${uki_name}.extra.d"
+printf "Installing signed installer add-on %s next to %s\n" \
+    "${installer_addon##*/}" "${uki_name}"
+mmd -D s -i "${disk_raw}@@${xbootldr_offset}" \
+    "::EFI/Linux/${addon_directory}" || true
+mcopy -n -o -i "${disk_raw}@@${xbootldr_offset}" \
+    "${installer_addon}" \
+    "::EFI/Linux/${addon_directory}/10-proto-installer.addon.efi"
+
 xz --threads=0 --stdout "${disk_raw}" > "${temporary}"
 [[ ${disk_input} == "${disk_xz}" ]] || rm -f -- "${disk_input}"
 mv -f -- "${temporary}" "${disk_xz}"

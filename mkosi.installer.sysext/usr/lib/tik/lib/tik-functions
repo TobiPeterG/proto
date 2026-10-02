@@ -1,0 +1,382 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: Copyright 2023-2025 SUSE LLC
+# SPDX-FileCopyrightText: Copyright 2023-2025 Richard Brown
+# SPDX-FileCopyrightText: Copyright 2025 Tobias Görgens
+
+. /usr/lib/tik/lib/cenity
+
+# Helper functions for tik-functions
+. ${tik_dir}/lib/tik-functions-helper
+
+log() {
+    if $logging; then
+        echo "[${tik_module}][$(date +"%Y%m%d-%T")][LOG] $*" 1>&2
+    fi
+}
+
+warn() {
+    echo "[${tik_module}][$(date +"%Y%m%d-%T")][WARN] $*" 1>&2
+    d --warning --text="$*"
+}
+
+error() {
+    echo "[${tik_module}][$(date +"%Y%m%d-%T")][ERROR] $*" 1>&2
+    d --error --text="$*"
+    exit 1
+}
+
+d() {
+    while true
+    do
+        retval=0
+        if $gui; then
+            result="$(zenity "$@")" || retval=$?
+            log "[zenity][${retval}][${result}] $@"
+        else
+            cenity result "$@" || retval=$?
+            log "[cenity][${retval}][${result}] $@"
+        fi
+        case $retval in
+            0)
+                return 0
+            ;;
+            1|255)
+                if $gui; then
+                    zenity --question --text="Do you really want to quit?" && exit 1
+                else
+                    cenity result --question --text="Do you really want to quit?" && exit 1
+                fi
+            ;;
+        esac
+    done
+}
+
+d_opt() {
+    retval=0
+    if $gui; then
+        result="$(zenity "$@")" || retval=$?
+        log "[zenity][${retval}][${result}] $@"
+    else
+        cenity result "$@" || retval=$?
+        log "[cenity][${retval}][${result}] $@"
+    fi
+    return $retval
+}
+
+# variant of privileged run (prun) function that doesn't require the pkexec call to return 0
+prun-opt() {
+    if [ "${debug}" == "1" ]; then
+        log "[pkexec-noexec] $@"
+    else
+        retval=0
+        pkexec "$@"
+        retval=$?
+        log "[pkexec][${retval}] $@"
+    fi
+}
+
+# Most commonly used prun function, which requires the called command to work
+prun() {
+    prun-opt "$@"
+    if [ "${retval}" != "0" ]; then
+        error "Command <tt>$@</tt> FAILED"
+    fi
+}
+
+tik_progress_step() {
+    # Create progress UI when first used in this phase
+    [ -n "${TIK_PROGRESS_PID}" ] || tik_prepare_progress_pipe
+
+    local message=$1
+    local module_percent=$2
+
+    if [ -z "${TIK_PIPE}" ]; then
+        return 0
+    fi
+
+    local overall_percent
+
+    if [ -n "${TIK_TOTAL_MODULES}" ] && [ "${TIK_TOTAL_MODULES}" -gt 0 ] && \
+       [ -n "${TIK_CURRENT_MODULE_INDEX}" ] && [ "${TIK_CURRENT_MODULE_INDEX}" -gt 0 ]; then
+        # Map module-local 0–100% into global 0–100% based on module index
+        # overall = ((index-1)*100 + module_percent) / total_modules
+        local base=$(( (TIK_CURRENT_MODULE_INDEX - 1) * 100 ))
+        local num=$(( base + module_percent ))
+        overall_percent=$(( num / TIK_TOTAL_MODULES ))
+    else
+        overall_percent=${module_percent}
+    fi
+
+    echo "# ${message}" > "${TIK_PIPE}"
+    echo "${overall_percent}" > "${TIK_PIPE}"
+}
+
+tik_unmount() {
+    local prefix="$1"
+    local listvar="${2:-TIK_MOUNTED_POINTS}"
+    local mp
+
+    [ -n "${prefix}" ] || return 0
+
+    local -n _ml="${listvar}"
+
+    log "[tik_unmount] unmounting ${prefix} (list=${listvar})"
+    while IFS= read -r mp; do
+        [ -z "${mp}" ] && continue
+        case "${mp}" in
+            "${prefix}"|${prefix}/*)
+                prun-opt /usr/bin/umount "${mp}"
+                ;;
+        esac
+    done <<< "${_ml}"
+
+    tik_untrack_mountpoint "${prefix}" "${listvar}"
+}
+
+tik_mount() {
+    # Mount a device and track it.
+    # If the 2nd argument is an absolute path, mount there.
+    # Otherwise, mount at a subfolder of TIK_ROOT_MNT.
+    local dev="$1"
+    local path="$2"
+    local opts="$3"
+    local fstype="$4"
+    local listvar="${5:-TIK_MOUNTED_POINTS}"
+    local overlay_root_prefix="$6"
+
+    [ -n "${dev}" ] || error "tik_mount: missing device"
+    [ -n "${path}" ] || error "tik_mount: missing target/subpath"
+
+    local target=""
+
+    case "${path}" in
+        /*)
+            target="${path}"
+            ;;
+        *)
+            [ -n "${TIK_ROOT_MNT}" ] || error "tik_mount: TIK_ROOT_MNT not set"
+            if echo "${path}" | grep -qE '(^|/)\.\.($|/)'; then
+                error "tik_mount: unsafe subpath '${path}'"
+            fi
+            target="${TIK_ROOT_MNT%/}/${path}"
+            ;;
+    esac
+
+    case "${target}" in
+        /*) ;;
+        *) error "tik_mount: target must be absolute (got '${target}')" ;;
+    esac
+
+    log "[tik_mount] mounting ${dev} at ${target} opts='${opts}' fstype='${fstype}' (list=${listvar})"
+    prun /usr/bin/mkdir -p "${target}"
+
+    if [ "${fstype}" = "none" ] && (tik_is_opt_set "${opts}" "bind" || tik_is_opt_set "${opts}" "rbind"); then
+        if tik_is_opt_set "${opts}" "rbind"; then
+            prun /usr/bin/mount --rbind "${dev}" "${target}"
+        else
+            prun /usr/bin/mount --bind "${dev}" "${target}"
+        fi
+        if tik_is_opt_set "${opts}" "ro" || tik_is_opt_set "${opts}" "nosuid" || tik_is_opt_set "${opts}" "nodev" || tik_is_opt_set "${opts}" "noexec"; then
+            prun /usr/bin/mount -o "remount,${opts}" "${target}"
+        fi
+
+    elif [ "${fstype}" = "overlay" ]; then
+        local newopts="${opts}"
+        if [ -n "${overlay_root_prefix}" ]; then
+            newopts="$(tik_rewrite_overlay_opts "${opts}" "${overlay_root_prefix}")"
+        fi
+        prun /usr/bin/mount -t overlay overlay -o "${newopts}" "${target}"
+
+    else
+        if [ -n "${fstype}" ]; then
+            if [ -n "${opts}" ]; then
+                prun /usr/bin/mount -t "${fstype}" -o "${opts}" "${dev}" "${target}"
+            else
+                prun /usr/bin/mount -t "${fstype}" "${dev}" "${target}"
+            fi
+        else
+            if [ -n "${opts}" ]; then
+                prun /usr/bin/mount -o "${opts}" "${dev}" "${target}"
+            else
+                prun /usr/bin/mount "${dev}" "${target}"
+            fi
+        fi
+    fi
+
+    tik_track_mountpoint "${target}" "${listvar}"
+}
+
+tik_partition_by_type() {
+    local disk="$1"
+    local type="${2,,}"
+
+    lsblk "${disk}" -nrpo PATH,PARTTYPE |
+        awk -v wanted="${type}" \
+            'tolower($2) == wanted { print $1; exit }'
+}
+
+tik_target_mount() {
+    # $1 = mapper override
+    # $2 = mode: required | optional
+    local mapper_override="$1"
+    local mode="${2:-required}"
+
+    [ "${TIK_MOUNTED_TARGET}" = "1" ] && return 0
+
+    tik_mount_prepare
+
+    # open encrypted device(s)
+    local crypt_parts=""
+    crypt_parts="$(
+        lsblk "${TIK_INSTALL_DEVICE}" -p -n -r -o ID-LINK,FSTYPE | tr -s ' ' ";" | grep ";crypto_LUKS" | cut -d\; -f1
+    )"
+
+    if [ -n "${crypt_parts}" ]; then
+        local crypt_part
+        for crypt_part in ${crypt_parts}; do
+            tik_crypt_open "${mapper_override}" "${mode}" "${crypt_part}"
+            case "$?" in
+                0) ;;
+                *)
+                    return "$?"
+                    ;;
+            esac
+
+            # If we opened something, check whether it looks like the root filesystem
+            if [ -n "${TIK_ROOT_DEV}" ]; then
+                if tik_is_root_partition "${TIK_ROOT_DEV}"; then
+                    break
+                fi
+
+                # Not root -> close and try the next encrypted partition
+                if [ -n "${TIK_OPENED_MAPPER}" ]; then
+                    prun-opt /usr/sbin/cryptsetup luksClose "${TIK_OPENED_MAPPER}"
+                fi
+                TIK_CRYPT_PART=""
+                export TIK_CRYPT_PART
+                TIK_ROOT_DEV=""
+                export TIK_ROOT_DEV
+                TIK_OPENED_MAPPER=""
+                export TIK_OPENED_MAPPER
+            fi
+        done
+    fi
+    # No enrypted root partition found -> search all partitions for a root filesystem
+    if [ -z "$TIK_ROOT_DEV" ]; then
+        local part
+        local parts=""
+        parts="$(
+            lsblk "${TIK_INSTALL_DEVICE}" -p -n -r -o NAME,TYPE | awk '$2=="part"{print $1}'
+        )"
+
+        for part in ${parts}; do
+            if tik_is_root_partition "${part}"; then
+                TIK_ROOT_DEV="${part}"
+                export TIK_ROOT_DEV
+                break
+            fi
+        done
+        # Also no root partition found
+        if [ "${mode}" = "required" ]; then
+            error "No existing system found"
+        fi
+        return 1
+    fi
+    export TIK_ROOT_DEV
+
+    log "[tik_target_mount] root device is ${TIK_ROOT_DEV}"
+
+    # mount root
+    tik_mount_root "${TIK_ROOT_DEV}" "${TIK_ROOT_MNT}"
+
+    # Existing Proto installations have deployment-specific /etc snapshots.
+    # Prefer the last selected version, then the highest version; freshly
+    # deployed migration targets still use the bootstrap @etc seed.
+    local etc_subvolume="${TIK_ETC_SUBVOLUME:-}" candidate current
+    if [[ ${etc_subvolume} == @etc ]]; then
+        if ! mountpoint -q "${TIK_ROOT_MNT}/.system"; then
+            tik_mount "${TIK_ROOT_DEV}" "${TIK_ROOT_MNT}/.system" \
+                "subvol=/,nodev,nosuid" btrfs
+        fi
+        current="$(readlink "${TIK_ROOT_MNT}/.system/@etc-current" 2>/dev/null || true)"
+        if [[ ${current} =~ ^@etc-[A-Za-z0-9][A-Za-z0-9._+-]*$ &&
+              -d ${TIK_ROOT_MNT}/.system/${current} ]]; then
+            etc_subvolume="${current}"
+        else
+            candidate="$(
+                for current in "${TIK_ROOT_MNT}/.system/"@etc-*; do
+                    [[ -d ${current} && ! -L ${current} ]] || continue
+                    printf '%s\n' "${current##*/}"
+                done | sort -V | tail -n1
+            )"
+            [[ -z ${candidate} ]] || etc_subvolume="${candidate}"
+        fi
+    fi
+    # Mount it before assembling fstab so the normal TIK helpers see /etc.
+    if [ -n "${TIK_ETC_SUBVOLUME:-}" ] &&
+        prun-opt /usr/sbin/btrfs subvolume list "${TIK_ROOT_MNT}" |
+            awk -v path="${etc_subvolume#/}" '$NF == path { found=1 } END { exit !found }'; then
+        tik_mount "${TIK_ROOT_DEV}" "${TIK_ROOT_MNT}/etc" \
+            "subvol=/${etc_subvolume#/}" btrfs
+    elif [ -n "${TIK_ETC_SUBVOLUME:-}" ]; then
+        log "[tik_target_mount] configured /etc subvolume ${TIK_ETC_SUBVOLUME} not found"
+    fi
+
+    # Assemble fstab in a writable location
+    local assembled
+    assembled="$(tik_fstab_assemble "${TIK_ROOT_MNT}")"
+    TIK_TARGET_FSTAB="${assembled}"
+    export TIK_TARGET_FSTAB
+    TIK_ASSEMBLED_FSTAB="${assembled}"
+    export TIK_ASSEMBLED_FSTAB
+
+    # mount everything described by assembled fstab
+    tik_mount_from_fstab "${TIK_ROOT_MNT}"
+
+    # A self-deployed target has the exact authenticated /usr currently used
+    # by the live system. Bind it into the target so chrooted systemd tools and
+    # their libraries are available before the installed system has booted.
+    if [[ "${TIK_BIND_LIVE_USR:-0}" == 1 ]] && ! mountpoint -q "${TIK_ROOT_MNT}/usr"; then
+        tik_mount /usr "${TIK_ROOT_MNT}/usr" "bind,ro" none
+    fi
+
+    # Mount the target's boot partitions explicitly. Proto intentionally has
+    # no persistent fstab entries for discoverable GPT partitions, while
+    # systemd-pcrlock needs the target XBOOTLDR for its credential.
+    TIK_XBOOTLDR_PART="$(tik_partition_by_type "${TIK_INSTALL_DEVICE}" \
+        bc13c2ff-59e6-4262-a352-b275fd6f7172)"
+    export TIK_XBOOTLDR_PART
+    if [[ -n "${TIK_XBOOTLDR_PART}" ]] && ! mountpoint -q "${TIK_ROOT_MNT}/boot"; then
+        tik_mount "${TIK_XBOOTLDR_PART}" "${TIK_ROOT_MNT}/boot" "rw" vfat
+        log "[tik_target_mount] mounted XBOOTLDR ${TIK_XBOOTLDR_PART}"
+    fi
+
+    TIK_ESP_PART="$(tik_partition_by_type "${TIK_INSTALL_DEVICE}" \
+        c12a7328-f81f-11d2-ba4b-00a0c93ec93b)"
+    export TIK_ESP_PART
+    if [[ -n "${TIK_ESP_PART}" ]] && ! mountpoint -q "${TIK_ROOT_MNT}/efi"; then
+        tik_mount "${TIK_ESP_PART}" "${TIK_ROOT_MNT}/efi" "rw" vfat
+        log "[tik_target_mount] mounted ESP ${TIK_ESP_PART}"
+    elif [[ -z "${TIK_ESP_PART}" ]]; then
+        log "[tik_target_mount] no ESP found (continuing)"
+    fi
+
+    # bind pseudo fs for chroot usage
+    tik_mount_pseudofs "${TIK_ROOT_MNT}"
+
+    log "[tik_target_mount] Target system mounted"
+
+    TIK_MOUNTED_TARGET=1
+    export TIK_MOUNTED_TARGET
+}
+
+tik_write_fstab() {
+    [ "${TIK_MOUNTED_TARGET}" = "1" ] || error "tik_write_fstab: target system not mounted"
+
+    # Install assembled fstab into the target if possible
+    if [ -n "${TIK_ASSEMBLED_FSTAB}" ] && [ -f "${TIK_ASSEMBLED_FSTAB}" ]; then
+        tik_fstab_install "${TIK_ROOT_MNT}" "${TIK_ASSEMBLED_FSTAB}" || true
+    else
+        error "tik_write_fstab: no assembled fstab available"
+    fi
+}

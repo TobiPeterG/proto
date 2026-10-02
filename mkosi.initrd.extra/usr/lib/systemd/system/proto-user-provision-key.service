@@ -1,0 +1,9 @@
+[Unit]
+Description=Prepare the Proto USER bootstrap key
+DefaultDependencies=no
+ConditionKernelCommandLine=!systemd.volatile=yes
+Before=systemd-repart.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/proto-user-provision prepare

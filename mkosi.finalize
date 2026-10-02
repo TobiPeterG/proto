@@ -18,6 +18,18 @@ done
     exit 1
 }
 
+# Generate the desktop-specific live role as a separate unsigned PE artifact.
+# OBS signs it alongside the UKI. The terminal signing stage replaces this
+# copy in XBOOTLDR with the signed artifact before publishing the disk image.
+addon="${OUTPUTDIR:?}/${IMAGE_ID:?}-installer.addon.efi"
+"${source_dir}/mkosi.make-installer-addon" "${source_dir}" "${addon}"
+# Finalize scripts run before mkosi generates the UKI, so create its companion
+# directory from the same configured naming fields mkosi uses moments later.
+uki="${IMAGE_ID}_${IMAGE_VERSION:?mkosi image version is required}_${ARCHITECTURE:?}.efi"
+install -d -m 0755 "${root}/boot/EFI/Linux/${uki}.extra.d"
+install -m 0644 "${addon}" \
+    "${root}/boot/EFI/Linux/${uki}.extra.d/10-proto-installer.addon.efi"
+
 install -d -m 0755 "${root}/usr/lib/systemd"
 base64 -d "${source_dir}/mkosi.keys/obs-project.pgp.b64" \
     > "${root}/usr/lib/systemd/import-pubring.pgp"

@@ -1,0 +1,17 @@
+#!/usr/bin/bash
+# SPDX-License-Identifier: MIT
+set -euo pipefail
+
+# /usr is the authenticated deployment being booted, not the last boot's OS.
+. /sysroot/usr/lib/os-release
+: "${IMAGE_VERSION:?authenticated /usr does not identify its image version}"
+# btrfs/setfiles and the deployed Python runtime need the usual pseudo-filesystems.
+# PrivateMounts=yes on the unit contains these binds; systemd removes the whole
+# namespace after the oneshot, including on failure.
+for path in dev proc run sys; do
+    mount --rbind "/${path}" "/sysroot/${path}"
+    mount --make-rslave "/sysroot/${path}"
+done
+exec chroot /sysroot /usr/lib/proto-etc-factory select \
+    --state=/.system --version="${IMAGE_VERSION}" \
+    --factory=/usr/share/factory/etc --relabel

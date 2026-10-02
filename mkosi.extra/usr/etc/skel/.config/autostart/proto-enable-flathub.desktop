@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Enable Flathub
+Comment=Configure Flathub for this user
+Exec=/usr/libexec/proto-enable-flathub-user
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=10

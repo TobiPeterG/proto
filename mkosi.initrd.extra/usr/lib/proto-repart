@@ -1,0 +1,27 @@
+#!/usr/bin/bash
+set -euo pipefail
+
+# During split-/usr initrd boot, the authenticated system /usr is commonly
+# mounted below /sysusr.
+if [[ -d /sysusr/usr/lib/repart.d ]]; then
+    source_root=/sysusr
+elif [[ -d /sysroot/usr/lib/repart.d ]]; then
+    source_root=/sysroot
+else
+    echo 'proto: authenticated /usr is unavailable to systemd-repart' >&2
+    exit 1
+fi
+
+reset_options=(--defer-partitions-factory-reset=yes)
+if [[ -e /run/proto-user-provision.reset-incomplete ]]; then
+    # Recover an interrupted first-boot transaction. This is
+    # different from a requested factory-reset boot, which deletes USER and
+    # defers recreation until the next ordinary boot.
+    reset_options=(--factory-reset=yes --defer-partitions-factory-reset=no)
+fi
+
+exec systemd-repart --dry-run=no \
+    --definitions="${source_root}/usr/lib/repart.d" \
+    --copy-source="${source_root}" \
+    --key-file=/run/proto-user-provision.key \
+    "${reset_options[@]}"

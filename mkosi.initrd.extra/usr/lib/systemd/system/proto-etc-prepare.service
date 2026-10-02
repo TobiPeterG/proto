@@ -1,0 +1,13 @@
+[Unit]
+Description=Prepare the current deployment's persistent /etc snapshot
+DefaultDependencies=no
+ConditionKernelCommandLine=!systemd.volatile=yes
+Requires=sysroot.mount sysroot-usr.mount sysroot-.system.mount
+After=sysroot.mount sysroot-usr.mount sysroot-.system.mount
+Before=sysroot-etc.mount initrd-parse-etc.service initrd-fs.target initrd-switch-root.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+PrivateMounts=yes
+ExecStart=/usr/lib/proto-etc-prepare

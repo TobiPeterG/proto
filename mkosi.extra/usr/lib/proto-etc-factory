@@ -2,14 +2,17 @@
 """Maintain deployment-specific /etc trees from /usr/share/factory/etc."""
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 
 
 METADATA = ".proto-etc-factory.json"
@@ -135,6 +138,94 @@ def seed(factory: Path):
     write_metadata(factory, entries(factory))
 
 
+def is_subvolume(path: Path) -> bool:
+    if path.is_symlink() or not path.is_dir():
+        return False
+    result = subprocess.run(
+        ["btrfs", "subvolume", "show", str(path)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    return result.returncode == 0
+
+
+def relabel_etc(etc: Path):
+    # Stage the snapshot as /etc under an alternate root so setfiles matches
+    # /etc policy paths, rather than treating its files as /passwd, /shadow, …
+    config = (etc / "selinux/config").read_text(encoding="utf-8")
+    match = re.search(r"^SELINUXTYPE=([a-zA-Z0-9_-]+)$", config, re.MULTILINE)
+    policy_type = match.group(1) if match else "targeted"
+    contexts = etc / f"selinux/{policy_type}/contexts/files/file_contexts"
+    if not contexts.is_file():
+        raise RuntimeError(f"SELinux contexts missing: {contexts}")
+    with tempfile.TemporaryDirectory(prefix="proto-etc-label-", dir="/run") as root:
+        mounted = Path(root) / "etc"
+        mounted.mkdir()
+        subprocess.run(["mount", "--bind", str(etc), str(mounted)], check=True)
+        try:
+            subprocess.run(
+                ["setfiles", "-F", "-r", root, str(contexts), str(mounted)], check=True,
+            )
+        finally:
+            subprocess.run(["umount", str(mounted)], check=True)
+
+
+def select_etc(state: Path, version: str, factory: Path, relabel: bool = False):
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", version):
+        raise ValueError(f"Unsafe image version: {version!r}")
+    if not factory.is_dir():
+        raise RuntimeError(f"Factory /etc missing: {factory}")
+    destination = state / f"@etc-{version}"
+    # Serialize selection with any future installer/provisioning callers.
+    with (state / ".proto-etc.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if os.path.lexists(destination):
+            if not is_subvolume(destination):
+                raise RuntimeError(f"Existing deployment /etc is not a subvolume: {destination}")
+            # Existing versions are deliberately not merged on every boot:
+            # rollback must reuse that version's own configuration unchanged.
+        else:
+            candidates = [
+                path.name for path in state.glob("@etc-*")
+                if re.fullmatch(r"@etc-[A-Za-z0-9][A-Za-z0-9._+-]*", path.name)
+                and is_subvolume(path)
+            ]
+            if candidates:
+                ordered = subprocess.run(
+                    ["sort", "-V"], input="\n".join(candidates) + "\n",
+                    text=True, capture_output=True, check=True,
+                ).stdout.splitlines()
+                previous = state / ordered[-1]
+            else:
+                previous = state / "@etc"
+            if not is_subvolume(previous):
+                raise RuntimeError(f"No /etc snapshot or bootstrap subvolume found in {state}")
+            # Publish only after merge/relabel succeed. A failed or interrupted
+            # creation cannot leave a partially migrated @etc-VERSION in use.
+            with tempfile.TemporaryDirectory(prefix=".proto-etc-new-", dir=state) as work:
+                snapshot = Path(work) / "etc"
+                try:
+                    subprocess.run(
+                        ["btrfs", "subvolume", "snapshot", str(previous), str(snapshot)],
+                        check=True,
+                    )
+                    merge(snapshot, factory, None)
+                    if relabel:
+                        relabel_etc(snapshot)
+                    os.rename(snapshot, destination)
+                finally:
+                    if snapshot.exists():
+                        subprocess.run(
+                            ["btrfs", "subvolume", "delete", str(snapshot)], check=True,
+                        )
+        # A relative symlink survives switch-root and is also useful to TIK
+        # when mounting an existing installation for account migration.
+        link = state / ".proto-etc-current.new"
+        link.unlink(missing_ok=True)
+        link.symlink_to(destination.name)
+        os.replace(link, state / "@etc-current")
+    return destination
+
+
 def sync_late(baseline: Path, source: Path, target: Path):
     before = entries(baseline, include_never=True)
     now = entries(source, include_never=True)
@@ -161,12 +252,19 @@ def main():
     sync_parser.add_argument("--baseline", required=True, type=Path)
     sync_parser.add_argument("--source", required=True, type=Path)
     sync_parser.add_argument("--target", required=True, type=Path)
+    select_parser = commands.add_parser("select")
+    select_parser.add_argument("--state", required=True, type=Path)
+    select_parser.add_argument("--version", required=True)
+    select_parser.add_argument("--factory", required=True, type=Path)
+    select_parser.add_argument("--relabel", action="store_true")
     args = parser.parse_args()
 
     if args.command == "seed":
         seed(args.factory)
     elif args.command == "merge":
         merge(args.etc, args.factory, args.old_factory)
+    elif args.command == "select":
+        select_etc(args.state, args.version, args.factory, args.relabel)
     else:
         sync_late(args.baseline, args.source, args.target)
 

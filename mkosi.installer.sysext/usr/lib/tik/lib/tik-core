@@ -1,0 +1,318 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: Copyright 2025 SUSE LLC
+# SPDX-FileCopyrightText: Copyright 2025 Tobias Görgens
+
+# Helper functions for tik-core
+. ${tik_dir}/lib/tik-core-helper
+
+tik_detect_identity() {
+    if [[ -n ${TIK_OS_NAME:-} ]]; then
+        [[ -n ${TIK_CRYPT_MAPPER:-} ]] || tik_set_identity_from_name "${TIK_OS_NAME}"
+    else
+        tik_set_identity_for_selfdeploy
+    fi
+}
+
+tik_assert_secure_boot() {
+    /usr/lib/tik/libexec/tik-sysinstall --check-secure-boot ||
+        error "Installation requires Secure Boot with shim validation enabled."
+}
+
+tik_source_disks() {
+    local mountpoint source
+
+    for mountpoint in / /usr /boot /efi; do
+        source="$(findmnt -nro SOURCE --target "${mountpoint}" 2>/dev/null || true)"
+        source="${source%%\[*}"
+        [[ -n "${source}" && -e "${source}" ]] || continue
+
+        lsblk -snrpo PATH,TYPE "${source}" 2>/dev/null |
+            awk '$2 == "disk" || $2 ~ /^raid/ { print $1 }'
+    done | while read -r source; do
+        readlink -f -- "${source}"
+    done | sort -u
+}
+
+tik_is_source_disk() {
+    local candidate
+    candidate="$(readlink -f -- "$1")"
+    grep -Fxq -- "${candidate}" <<<"${TIK_SOURCE_DISKS:-}"
+}
+
+tik_assert_safe_install_target() {
+    local target
+    target="$(readlink -f -- "$1")"
+
+    if tik_is_source_disk "${target}"; then
+        error "Refusing to install to the disk backing the running live system: ${target}"
+    fi
+}
+
+get_disk() {
+    tik_volid="${TIK_INSTALL_MEDIA_LABEL:-TIKINSTALL}"
+    local disk_id="by-id"
+    local disk_size
+    local disk_device
+    local disk_device_by_id
+    local disk_meta
+    local disk_list
+    local device_array
+    local list_items
+    local blk_opts="-p -n -r -o NAME,SIZE,TYPE"
+    local message
+    local blk_opts_plus_label="${blk_opts},LABEL"
+    local tik_install_disk_part
+    local part_meta
+    local part_count
+    local part_size
+    local part_info
+    local part_fs
+    local blk_opts_part_info="${blk_opts_plus_label},FSTYPE"
+    local usb_match_1="usb"
+    local usb_match_2=":0"
+
+    TIK_SOURCE_DISKS="$(tik_source_disks)"
+    export TIK_SOURCE_DISKS
+    log "[get_disk] excluding live-system disk(s): ${TIK_SOURCE_DISKS:-none detected}"
+
+    tik_install_disk_part=$(
+        eval lsblk "${blk_opts_plus_label}" | \
+        tr -s ' ' ":" | \
+        grep ":${tik_volid}" | \
+        cut -f1 -d:
+    )
+
+    for disk_meta in $(
+        eval lsblk "${blk_opts}" | grep -E "disk|raid" | tr ' ' ":"
+    ); do
+        disk_size=$(echo "${disk_meta}" | cut -f2 -d:)
+        if [[ "${disk_size}" == "0B" ]]; then
+            continue
+        fi
+        disk_device="$(echo "${disk_meta}" | cut -f1 -d:)"
+        part_count=0
+        part_info=""
+        for part_meta in $(
+            eval lsblk "${blk_opts_part_info}" | grep -E "${disk_device}.+part.+" | tr ' ' ":"
+        ); do
+            part_count=$(expr $part_count + 1)
+            part_size=$(echo "${part_meta}" | cut -f2 -d:)
+            part_fs=$(echo "${part_meta}" | cut -f5 -d:)
+            if [ -n "${part_info}" ]; then
+                part_info="${part_info},"
+            fi
+            if [ -n "${part_fs}" ]; then
+                part_info="${part_info}${part_fs}(${part_size})"
+            else
+                part_info="${part_info}unknown(${part_size})"
+            fi
+        done
+        if [[ ${part_count} -eq 0 ]]; then
+            part_info="none"
+        fi
+        if [[ "${tik_install_disk_part}" == "${disk_device}"* ]]; then
+            continue
+        fi
+        if [[ ${disk_device} =~ ^/dev/fd ]]; then
+            continue
+        fi
+        if [[ ${disk_device} =~ ^/dev/zram ]]; then
+            continue
+        fi
+        if tik_is_source_disk "${disk_device}"; then
+            continue
+        fi
+        disk_device_by_id=$(
+            get_persistent_device_from_unix_node "${disk_device}" "${disk_id}"
+        )
+        if [[ ( "${TIK_ALLOW_USB_INSTALL_DEVICES}" -ne 1 ) && ( "${disk_device_by_id}" == *"${usb_match_1}"* || "${disk_device_by_id}" == *"${usb_match_2}"* ) ]]; then
+            continue
+        fi
+        if [ -n "${disk_device_by_id}" ]; then
+            disk_device=${disk_device_by_id}
+        fi
+        list_items="${list_items} $(basename ${disk_device}) ${disk_size} ${part_count} ${part_info}"
+        disk_list="${disk_list} $(basename ${disk_device}) ${disk_size}"
+    done
+
+    if [ -n "${TIK_INSTALL_DEVICE}" ]; then
+        local device=${TIK_INSTALL_DEVICE}
+        local device_meta
+        local device_size
+        if [ ! -e "${device}" ]; then
+            local no_dev="Given device <tt>${device}</tt> does not exist."
+            error "${no_dev}"
+        fi
+        if [ ! -b "${device}" ]; then
+            local no_block_dev="Given device <tt>${device}</tt> is not a block special."
+            error "${no_block_dev}"
+        fi
+        tik_assert_safe_install_target "${device}"
+        device_meta=$(
+            eval lsblk "${blk_opts}" "${device}" |\
+            grep -E "disk|raid" | tr ' ' ":"
+        )
+        device_size=$(echo "${device_meta}" | cut -f2 -d:)
+        list_items="$(basename ${device}) ${device_size}"
+        disk_list="$(basename ${device}) ${device_size}"
+        message="[get_disk] tik installation device set to to: ${device}"
+        log "${message}"
+    fi
+
+    if [ -z "${list_items}" ]; then
+        local no_device_text="No device(s) for installation found."
+        error "${no_device_text}"
+    fi
+
+    if [ -n "${disk_list}" ]; then
+        local count=0
+        local device_index=0
+        for entry in ${disk_list}; do
+            if [ $((count % 2)) -eq 0 ]; then
+                device_array[${device_index}]=${entry}
+                device_index=$((device_index + 1))
+            fi
+            count=$((count + 1))
+        done
+        if [ "${device_index}" -eq 1 ]; then
+            TIK_INSTALL_DEVICE="/dev/disk/${disk_id}/${device_array[0]}"
+            if [ ! -e "${TIK_INSTALL_DEVICE}" ]; then
+                TIK_INSTALL_DEVICE="/dev/${device_array[0]}"
+            fi
+        else
+            d --list --column=Disk --column=Size --column=Partitions --column=Filesystems --width=1050 --height=340 --title="Select A Disk" --text="Select the disk to install the operating system to. <b>Make sure any important documents and files have been backed up.</b>\n" ${list_items}
+            TIK_INSTALL_DEVICE="/dev/disk/${disk_id}/${result}"
+            if [ ! -e "${TIK_INSTALL_DEVICE}" ]; then
+                TIK_INSTALL_DEVICE="/dev/${result}"
+            fi
+        fi
+        tik_assert_safe_install_target "${TIK_INSTALL_DEVICE}"
+    fi
+}
+
+reread_partitiontable() {
+    log "[reread_partitiontable] Re-reading partition table"
+    sleep 3
+    prun /usr/sbin/blockdev --rereadpt "${TIK_INSTALL_DEVICE}"
+    sleep 3
+}
+
+install_system() {
+    local target=$1
+    tik_assert_secure_boot
+    d --question --no-wrap --title="Begin Installation?" --text="Once installation begins, changes to the selected disk are irreversible.\n\n<b>Proceeding will fully erase the disk.</b>\n\nContinue?"
+    [[ ${retval} == 0 ]] || error "Installation cancelled"
+    tik_prepare_install_target "${target}"
+    if [[ ${migrate:-0} == 1 ]]; then
+        create_keyfile
+    fi
+    prun /usr/lib/tik/libexec/tik-sysinstall "${target}" "${migrate:-0}" "${tik_keyfile:-}" \
+        > >(d --progress --title="Installing ${TIK_OS_NAME}" --text="Deploying verified system" --pulsate --auto-close --no-cancel --width=400)
+}
+
+set_boot_target() {
+    local efipartnum
+
+    if [ -z "${TIK_ESP_PART}" ]; then
+        TIK_ESP_PART="$(lsblk "${TIK_INSTALL_DEVICE}" -nrpo PATH,PARTTYPE |
+            awk 'tolower($2) == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" { print $1; exit }')"
+        export TIK_ESP_PART
+    fi
+    if [ -z "${TIK_ESP_PART}" ]; then
+        error "Could not find the EFI System Partition on ${TIK_INSTALL_DEVICE}"
+    fi
+
+    if [ "${debug}" == "1" ]; then
+        log "[debug] Not setting EFI boot target"
+    elif [ -n "${efi_already_set}" ]; then
+        log "[set_boot_target] boot target already set, not setting again"
+    else
+        # Keep other OS firmware entries and their BootOrder intact.
+
+        # TIK_ESP_PART is already set during mounting
+        efipartnum=$(lsblk "${TIK_ESP_PART}" -p -n -r -o PARTN)
+        prun /usr/sbin/efibootmgr -c -L "${TIK_OS_NAME} Boot Manager" -d "${TIK_INSTALL_DEVICE}" -l "\EFI\BOOT\BOOTX64.EFI" -p ${efipartnum}
+        log "[set_boot_target] $(prun /usr/sbin/efibootmgr)"
+        efi_already_set=1
+    fi
+}
+
+tik_init_phase_modules() {
+    local phase=$1
+    local dir
+    TIK_CURRENT_PHASE="${phase}"
+    TIK_TOTAL_MODULES=0
+    TIK_CURRENT_MODULE_INDEX=0
+
+    for dir in "${tik_dir}/modules/${phase}" "${TIK_CUSTOM_DIR}/modules/${phase}"; do
+        if [ -d "${dir}" ]; then
+            for f in "${dir}"/*; do
+                [ -f "${f}" ] || continue
+                TIK_TOTAL_MODULES=$((TIK_TOTAL_MODULES + 1))
+            done
+        fi
+    done
+
+    case $phase in
+        "pre")  TIK_PROGRESS_TITLE="Preparing Installation"  ;;
+        "post") TIK_PROGRESS_TITLE="Finishing Installation"  ;;
+        *)      TIK_PROGRESS_TITLE="Installation"            ;;
+    esac
+
+    export TIK_CURRENT_PHASE
+    export TIK_PROGRESS_TITLE
+
+    log "[tik_init_phase_modules] phase=${phase} total_modules=${TIK_TOTAL_MODULES}"
+}
+
+load_modules() {
+    local phase=$1
+    local module_dir
+
+    if [[ $2 = "custom" ]]; then
+        module_dir=$TIK_CUSTOM_DIR/modules/$phase
+    else
+        module_dir=$tik_dir/modules/$phase
+    fi
+
+    if [ -n "$(ls -A "$module_dir" 2>/dev/null)" ]; then
+        for f in "$module_dir"/*; do
+            [ -f "$f" ] || continue
+            TIK_CURRENT_MODULE_INDEX=$((TIK_CURRENT_MODULE_INDEX + 1))
+            tik_module="$f"
+            log "[START] $f (phase=${phase} module_index=${TIK_CURRENT_MODULE_INDEX}/${TIK_TOTAL_MODULES})"
+            . "$f"
+            log "[STOP] $f"
+
+            if [ -n "${TIK_TOTAL_MODULES}" ] && [ "${TIK_TOTAL_MODULES}" -gt 0 ] && \
+               [ "${TIK_CURRENT_MODULE_INDEX}" -eq "${TIK_TOTAL_MODULES}" ]; then
+                log "[load_modules] last module of phase '${phase}' completed, closing progress"
+                tik_close_progress
+                tik_cleanup_mounts
+            fi
+        done
+    fi
+    tik_module="tik"
+}
+
+wipe_keyfile() {
+    log "[wipe_keyfile] Deleting keyfile ${tik_keyfile}"
+
+    local crypt_part="${TIK_CRYPT_PART}"
+
+    if [ -z "${crypt_part}" ]; then
+        probe_partitions "${TIK_INSTALL_DEVICE}" "crypto_LUKS"
+        crypt_part="${probedpart}"
+    fi
+
+    if [ -n "${crypt_part}" ] && [ -n "${tik_keyfile}" ] && [ -f "${tik_keyfile}" ]; then
+        prun /usr/bin/systemd-cryptenroll --unlock-key-file="${tik_keyfile}" --wipe-slot=0 "${crypt_part}"
+    else
+        log "[wipe_keyfile] no LUKS partition or keyfile found, skipping slot wipe"
+    fi
+
+    if [[ -n ${tik_keyfile:-} ]]; then
+        prun /usr/bin/rm -- "${tik_keyfile}"
+        unset tik_keyfile
+    fi
+}

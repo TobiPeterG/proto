@@ -1,0 +1,254 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: Copyright 2025 SUSE LLC
+# SPDX-FileCopyrightText: Copyright 2025 Tobias Görgens
+
+tik_sanitize_os_id() {
+    # output: sanitized id (lowercase, underscores, letters only; digits removed)
+    local raw="$1"
+    local s
+
+    s="$(echo "${raw}" | tr '[:upper:]' '[:lower:]')"
+    s="$(echo "${s}" | sed -E 's/[[:space:]-]+/_/g')"
+    s="$(echo "${s}" | sed -E 's/[0-9]+//g')"
+    s="$(echo "${s}" | sed -E 's/[^a-z_]+/_/g')"
+    s="$(echo "${s}" | sed -E 's/_+/_/g; s/^_+//; s/_+$//')"
+
+    echo "${s}"
+}
+
+tik_set_identity_from_name() {
+    local pretty="$1"
+    local sid
+
+    [ -n "${pretty}" ] || pretty="TIK"
+
+    sid="$(tik_sanitize_os_id "${pretty}")"
+    [ -n "${sid}" ] || sid="cr"
+
+    TIK_OS_NAME="${pretty}"
+    export TIK_OS_NAME
+
+    TIK_OS_ID="${sid}"
+    export TIK_OS_ID
+
+    TIK_CRYPT_MAPPER="${sid}_root"
+    export TIK_CRYPT_MAPPER
+}
+
+tik_read_info_from_root() {
+    local osr="/etc/os-release"
+    [ -f "${osr}" ] || return 1
+
+    TIK_DETECTED_PRETTY_NAME="$(. "${osr}" 2>/dev/null; echo "${PRETTY_NAME}")"
+    TIK_DETECTED_ID="$(. "${osr}" 2>/dev/null; echo "${ID}")"
+
+    [ -n "${TIK_DETECTED_PRETTY_NAME}" ] || return 1
+    [ -n "${TIK_DETECTED_ID}" ] || return 1
+    return 0
+}
+
+tik_set_identity() {
+    local pretty="$1"
+    local raw_id="$2"
+    local sid
+
+    sid="$(tik_sanitize_os_id "${raw_id}")"
+    if [ -z "${sid}" ]; then
+        sid="cr"
+    fi
+
+    TIK_OS_NAME="${pretty}"
+    export TIK_OS_NAME
+
+    TIK_OS_ID="${sid}"
+    export TIK_OS_ID
+
+    TIK_CRYPT_MAPPER="${TIK_OS_ID}_root"
+    export TIK_CRYPT_MAPPER
+}
+
+tik_set_identity_unknown() {
+    TIK_OS_NAME="TIK"
+    export TIK_OS_NAME
+
+    TIK_OS_ID="cr"
+    export TIK_OS_ID
+
+    TIK_CRYPT_MAPPER="cr_root"
+    export TIK_CRYPT_MAPPER
+}
+
+tik_set_identity_for_selfdeploy() {
+    if tik_read_info_from_root; then
+        tik_set_identity "${TIK_DETECTED_PRETTY_NAME}" "${TIK_DETECTED_ID}"
+        return 0
+    fi
+    tik_set_identity_unknown
+    return 0
+}
+
+get_persistent_device_from_unix_node() {
+    local unix_device=$1
+    local schema=$2
+    local node
+    local persistent_name
+    node=$(basename "${unix_device}")
+    for persistent_name in /dev/disk/"${schema}"/*; do
+        if [ "$(basename "$(readlink "${persistent_name}")")" = "${node}" ]; then
+            if [[ ${persistent_name} =~ ^/dev/disk/"${schema}"/nvme-eui ]]; then
+                # Filter out nvme-eui nodes as they are not descriptive to the user
+                continue
+            fi
+            echo "${persistent_name}"
+            return
+        fi
+    done
+    warn "Could not find <tt>${schema}</tt> representation of <tt>${node}</tt>. Using original device <tt>${unix_device}</tt>"
+    echo "${unix_device}"
+}
+
+probe_partitions() {
+    local probe_dir=/var/lib/tik/probe
+    local filesystem_type=$2
+    local filematch=$3
+    local device=$1
+    local mountops
+    local part
+
+    if [[ "${filesystem_type}" == "btrfs" ]]; then
+        mountops="-o compress=zstd:1"
+    fi
+
+    prun /usr/bin/mkdir -p ${probe_dir}/mnt
+    probedpart=""
+
+    for part in $(lsblk ${device} -p -n -r -o ID-LINK,FSTYPE | tr -s ' ' ";" | grep ";${filesystem_type}" | cut -d\; -f1); do
+        if [ -z "${filematch}" ]; then
+            log "[probe_partitions] no file match required"
+            # Fallback to unix device in order to fix issue with USB devices
+            probedpart="$(/usr/bin/readlink -f "/dev/disk/by-id/""${part}")"
+            log "[probe_partitions] Partition ${probedpart} found"
+            break
+        else    # Check if ${filematch} exists
+            # Fallback to unix device in order to fix issue with USB devices
+            part="$(/usr/bin/readlink -f "/dev/disk/by-id/""${part}")"
+            prun /usr/bin/mount ${mountops} ${part} "${probe_dir}/mnt"
+            if [ -f ${probe_dir}/mnt/${filematch} ]; then
+                log "[probe_partitions] File ${filematch} found"
+                # Fallback to unix device in order to fix issue with USB devices
+                probedpart="${part}"
+                log "[probe_partitions] Partition ${probedpart} found"
+                prun-opt /usr/bin/umount ${probe_dir}/mnt
+                break
+            fi
+            prun-opt /usr/bin/umount ${probe_dir}/mnt
+        fi
+    done
+
+    prun /usr/bin/rmdir ${probe_dir}/mnt
+}
+
+create_keyfile() {
+    tik_keyfile=$(prun mktemp /run/tik.XXXXXXXXXX)
+    log "[create_keyfile] Creating keyfile ${tik_keyfile}"
+    /usr/bin/head -c 64 /dev/urandom | prun tee "${tik_keyfile}" >/dev/null
+    prun /usr/bin/chmod 400 "${tik_keyfile}"
+}
+
+tik_prepare_install_target() {
+    local target="$1"
+    local node mountpoint mapper swapdev
+
+    tik_assert_safe_install_target "${target}"
+    target="$(readlink -f -- "${target}")"
+    log "[tik_prepare_install_target] quiescing ${target} before repartitioning"
+
+    # Desktop automounters and stale mappings from a previous failed attempt
+    # otherwise keep the target busy. Only descendants of the already checked
+    # target disk are touched.
+    while read -r node; do
+        [[ -n "${node}" ]] || continue
+        while read -r mountpoint; do
+            [[ -n "${mountpoint}" ]] || continue
+            log "[tik_prepare_install_target] unmounting ${mountpoint}"
+            prun-opt /usr/bin/umount "${mountpoint}"
+        done < <(
+            findmnt -rn -S "${node}" -o TARGET 2>/dev/null |
+                awk '{ print length($0), $0 }' | sort -rn | cut -d' ' -f2-
+        )
+    done < <(lsblk -nrpo PATH "${target}")
+
+    while read -r swapdev; do
+        [[ -n "${swapdev}" ]] || continue
+        if lsblk -nrpo PATH "${target}" | grep -Fxq -- "${swapdev}"; then
+            log "[tik_prepare_install_target] disabling swap ${swapdev}"
+            prun-opt /usr/sbin/swapoff "${swapdev}"
+        fi
+    done < <(/usr/sbin/swapon --noheadings --raw --output NAME 2>/dev/null || true)
+
+    while read -r node mapper; do
+        [[ "${mapper}" == crypt ]] || continue
+        mapper="$(basename -- "${node}")"
+        log "[tik_prepare_install_target] closing stale mapping ${mapper}"
+        prun-opt /usr/sbin/cryptsetup close "${mapper}"
+    done < <(lsblk -nrpo PATH,TYPE "${target}" | tac)
+
+    prun-opt /usr/bin/udevadm settle --timeout=60
+    prun-opt /usr/sbin/blockdev --flushbufs "${target}"
+}
+
+tik_target_unmount() {
+    [ "${TIK_MOUNTED_TARGET}" = "1" ] || return 0
+
+    log "[tik_target_unmount] Unmounting target system"
+
+    # Unmount everything mounted under the target mount root
+    tik_unmount "${TIK_ROOT_MNT}"
+
+    # As a last resort, unmount the root mount lazily if still busy
+    prun-opt /usr/bin/umount -l "${TIK_ROOT_MNT}" || true
+
+    # Close luks mapping
+    if [ -n "${TIK_CRYPT_PART}" ]; then
+        local mapper_name="${TIK_OPENED_MAPPER:-${TIK_CRYPT_MAPPER:-cr_root}}"
+        log "[tik_target_unmount] closing encrypted root for ${TIK_CRYPT_PART} (mapper=${mapper_name})"
+        prun-opt /usr/sbin/cryptsetup luksClose "${mapper_name}"
+    fi
+
+    TIK_MOUNTED_POINTS=""
+    TIK_MOUNTED_TARGET=0
+    export TIK_MOUNTED_TARGET
+
+    TIK_OPENED_MAPPER=""
+    export TIK_OPENED_MAPPER
+}
+
+tik_cleanup_mounts() {
+    if [ -n "${TIK_MOUNTED_POINTS}" ] || [ "${TIK_MOUNTED_TARGET}" = "1" ]; then
+        log "[tik_cleanup_mounts] mounts detected after phase '${TIK_CURRENT_PHASE}', unmounting"
+        tik_target_unmount
+    fi
+}
+
+tik_close_progress() {
+    if [ -n "${TIK_PROGRESS_PID}" ]; then
+        log "[tik_close_progress] stopping progress monitor pid=${TIK_PROGRESS_PID}"
+
+        if [ -n "${TIK_PIPE}" ] && [ -p "${TIK_PIPE}" ]; then
+            echo "100" > "${TIK_PIPE}" 2>/dev/null || true
+        fi
+
+        kill -TERM -- "-${TIK_PROGRESS_PID}" 2>/dev/null || true
+        wait "${TIK_PROGRESS_PID}" 2>/dev/null || true
+
+        kill -KILL -- "-${TIK_PROGRESS_PID}" 2>/dev/null || true
+
+        unset TIK_PROGRESS_PID
+    fi
+
+    if [ -n "${TIK_PIPE}" ] && [ -p "${TIK_PIPE}" ]; then
+        log "[tik_close_progress] removing progress pipe ${TIK_PIPE}"
+        rm -f "${TIK_PIPE}" 2>/dev/null || true
+    fi
+    unset TIK_PIPE
+}

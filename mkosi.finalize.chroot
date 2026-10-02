@@ -11,11 +11,6 @@ sed -i \
     -e 's/^PRETTY_NAME=.*/PRETTY_NAME="Prototype Image System"/' \
     /usr/lib/os-release
 
-# All mounts are generated from the UKI command line. Keep the packaged file
-# present but empty so that local image policy cannot accidentally add mounts.
-: > /etc/fstab
-: > /etc/machine-id
-
 # New local users get their own Btrfs home subvolume. A user@.service drop-in
 # creates the corresponding per-user Snapper configuration at first login.
 if grep -q '^BTRFS_SUBVOLUME_HOME=' /etc/default/useradd; then
@@ -24,26 +19,6 @@ if grep -q '^BTRFS_SUBVOLUME_HOME=' /etc/default/useradd; then
 else
     printf '\n# Required for per-user Snapper snapshots.\nBTRFS_SUBVOLUME_HOME=yes\n' \
         >> /etc/default/useradd
-fi
-
-# SELinux is part of the image contract rather than an opt-in boot mode.
-if [[ -f /etc/selinux/config ]]; then
-    sed -i \
-        -e 's/^SELINUX=.*/SELINUX=enforcing/' \
-        -e 's/^SELINUXTYPE=.*/SELINUXTYPE=targeted/' \
-        /etc/selinux/config
-else
-    install -d -m 0755 /etc/selinux
-    printf 'SELINUX=enforcing\nSELINUXTYPE=targeted\n' > /etc/selinux/config
-fi
-
-# This state file is changed whenever Snapper adds a user configuration. It is
-# created by tmpfiles on installed systems and must not be reset by an image
-# update. Create the directories now so the live image is also well formed.
-install -d -m 0755 /etc/snapper/configs /etc/sysconfig
-if [[ ! -e /etc/sysconfig/snapper ]]; then
-    printf 'SNAPPER_CONFIGS=""\n' > /etc/sysconfig/snapper
-    chmod 0644 /etc/sysconfig/snapper
 fi
 
 # openSUSE keeps the vendor skeleton in /usr/etc/skel. Materialize it in the
@@ -59,8 +34,6 @@ cp -a /usr/etc/skel/. /etc/skel/
 rm -rf /usr/share/factory/etc
 install -d -m 0755 /usr/share/factory/etc
 cp -a /etc/. /usr/share/factory/etc/
-: > /usr/share/factory/etc/fstab
-: > /usr/share/factory/etc/machine-id
 rm -f /usr/share/factory/etc/hostname
 rm -f /usr/share/factory/etc/ssh/ssh_host_* 2>/dev/null || true
 # Snapper owns and rewrites this file. The tmpfiles definition creates it only
@@ -71,135 +44,8 @@ rm -f /usr/share/factory/etc/sysconfig/snapper
 # update untouched files and preserve administrator changes.
 /usr/lib/proto-etc-factory seed /usr/share/factory/etc
 
-# The mutable configuration is shared by both authenticated /usr slots. The
-# early merge service updates untouched vendor files and preserves local edits.
-install -d -m 0755 /usr/lib/proto
-cat > /usr/lib/proto/deployment.env <<EOF
-IMAGE_ID=${IMAGE_ID}
-ETC_SUBVOLUME=@etc
-EOF
-
-# systemd-repart validates MakeSymlinks= sources inside the new filesystem.
-# The installed root intentionally has no /usr tree at installation time, so
-# links such as /bin -> usr/bin would otherwise fail validation. Copy these
-# pre-made relative links as an opaque root skeleton instead.
-installer_root_skeleton=/usr/lib/proto/installer-root-skeleton
-rm -rf "${installer_root_skeleton}"
-install -d -m 0755 "${installer_root_skeleton}"
-ln -s usr/bin "${installer_root_skeleton}/bin"
-ln -s usr/lib "${installer_root_skeleton}/lib"
-ln -s usr/lib64 "${installer_root_skeleton}/lib64"
-ln -s usr/sbin "${installer_root_skeleton}/sbin"
-
 if [[ "${IMAGE_ID}" == proto-gnome ]]; then
-    # GNOME shows only the battery icon by default. Make the percentage a
-    # vendor default for both the live account and users created later by
-    # gnome-initial-setup. This must happen before the EROFS is generated.
-    install -d -m 0755 /usr/share/glib-2.0/schemas
-    cat > /usr/share/glib-2.0/schemas/90-proto.gschema.override <<'EOF'
-[org.gnome.desktop.interface]
-show-battery-percentage=true
-EOF
+    # Compile the desktop-specific vendor override supplied by the GNOME
+    # ExtraTrees source.
     glib-compile-schemas /usr/share/glib-2.0/schemas
-fi
-
-# Both desktop disk images double as live media. Their mutable state gets a
-# passwordless autologin account and authorization for the installer. None of
-# this is present in /usr/share/factory/etc, so it is not copied to the target.
-if [[ "${IMAGE_ID}" == proto-gnome || "${IMAGE_ID}" == proto-kde ]]; then
-    if [[ "${IMAGE_ID}" == proto-kde ]]; then
-        # Put Plasma's live-only policy into the skeleton before useradd so the
-        # account creation code copies it with the correct ownership even when
-        # mkosi builds in a user namespace where an explicit chown is rejected.
-        install -d -m 0700 /etc/skel/.config
-        cat > /etc/skel/.config/kscreenlockerrc <<'EOF'
-[Daemon]
-Autolock=false
-LockOnResume=false
-EOF
-        cat > /etc/skel/.config/kdeglobals <<'EOF'
-[KDE Action Restrictions]
-action/lock_screen=false
-EOF
-    fi
-
-    if ! getent passwd installer >/dev/null; then
-        useradd --uid 1000 --create-home --shell /bin/bash \
-            --comment 'proto Live User' installer
-    fi
-    usermod --append --groups wheel installer
-    passwd --delete installer
-
-    # openSUSE patches both GDM and SDDM to consume the common display-manager
-    # sysconfig. Keep it in sync with the native per-DM configuration below;
-    # in particular, SDDM's PAM setup uses the password-less-login setting.
-    if [[ -f /etc/sysconfig/displaymanager ]]; then
-        sed -i \
-            -e 's/^DISPLAYMANAGER_AUTOLOGIN=.*/DISPLAYMANAGER_AUTOLOGIN="installer"/' \
-            -e 's/^DISPLAYMANAGER_PASSWORD_LESS_LOGIN=.*/DISPLAYMANAGER_PASSWORD_LESS_LOGIN="yes"/' \
-            /etc/sysconfig/displaymanager
-    fi
-
-    if [[ "${IMAGE_ID}" == proto-gnome ]]; then
-        install -d -m 0755 /etc/gdm
-        cat > /etc/gdm/custom.conf <<'EOF'
-[daemon]
-AutomaticLoginEnable=True
-AutomaticLogin=installer
-EOF
-        # A passwordless live account must never reach a lock screen it cannot
-        # unlock. These dconf defaults are live-only because the factory /etc
-        # snapshot was taken above.
-        install -d -m 0755 /etc/dconf/profile /etc/dconf/db/local.d/locks
-        cat > /etc/dconf/profile/user <<'EOF'
-user-db:user
-system-db:local
-EOF
-        cat > /etc/dconf/db/local.d/00-proto-live <<'EOF'
-[org/gnome/desktop/lockdown]
-disable-lock-screen=true
-
-[org/gnome/desktop/screensaver]
-lock-enabled=false
-
-[org/gnome/desktop/session]
-idle-delay=uint32 0
-EOF
-        cat > /etc/dconf/db/local.d/locks/00-proto-live <<'EOF'
-/org/gnome/desktop/lockdown/disable-lock-screen
-/org/gnome/desktop/screensaver/lock-enabled
-/org/gnome/desktop/session/idle-delay
-EOF
-        dconf update
-    else
-        install -d -m 0755 /etc/sddm.conf.d
-        cat > /etc/sddm.conf.d/10-proto-live.conf <<'EOF'
-[Autologin]
-User=installer
-Session=plasma.desktop
-EOF
-
-        # Plasma Setup is enabled in the vendor preset so that first-boot
-        # preset processing cannot disable it on an installed system. The
-        # factory /etc snapshot above intentionally does not contain this
-        # completion marker; it is live-media-only.
-        : > /etc/plasma-setup-done
-
-    fi
-
-    install -d -m 0755 /etc/tmpfiles.d
-    cat > /etc/tmpfiles.d/proto-live.conf <<'EOF'
-d /home/installer 0755 installer users -
-d /home/installer/.config 0755 installer users -
-d /home/installer/.config/autostart 0755 installer users -
-d /home/installer/Desktop 0755 installer users -
-L+ /home/installer/.config/autostart/org.opensuse.ProtoInstaller.desktop - - - - /usr/share/applications/org.opensuse.ProtoInstaller.desktop
-L+ /home/installer/Desktop/Install\x20proto.desktop - - - - /usr/share/applications/org.opensuse.ProtoInstaller.desktop
-EOF
-
-    install -d -m 0755 /etc/polkit-1/rules.d
-    cat > /etc/polkit-1/rules.d/51-run0-nopasswd.rules <<'EOF'
-polkit._run0_nopasswd.push("installer");
-EOF
-    : > /etc/proto-live
 fi

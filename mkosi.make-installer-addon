@@ -1,0 +1,73 @@
+#!/usr/bin/bash
+set -euo pipefail
+
+source=${1:?source tree required}
+root=${BUILDROOT:?}
+output=${2:?output path required}
+stamp=${SOURCE_DATE_EPOCH:-0}
+
+case ${IMAGE_ID:?} in
+    proto-gnome) desktop=gnome ;;
+    proto-kde) desktop=kde ;;
+    *) echo "Unsupported installer desktop: ${IMAGE_ID}" >&2; exit 1 ;;
+esac
+
+case ${ARCHITECTURE:?} in
+    x86-64|x86_64) efi_arch=x64 ;;
+    arm64|aarch64) efi_arch=aa64 ;;
+    *) echo "Unsupported EFI architecture: ${ARCHITECTURE}" >&2; exit 1 ;;
+esac
+
+work=$(mktemp -d "${WORKDIR:-/var/tmp}/proto-installer-addon.XXXXXX")
+staging=${root}/run/proto-installer-confext-build
+cleanup() { rm -rf -- "${work}" "${staging}"; }
+trap cleanup EXIT
+addon_root=${work}/root
+confext_root=${work}/confext
+install -d -m 0755 \
+    "${addon_root}/proto-installer/sysext" \
+    "${addon_root}/proto-installer/confext" \
+    "${confext_root}"
+cp -a "${source}/mkosi.installer.addon/." "${addon_root}/"
+
+# Bare EROFS images are valid systemd sysext/confext images. Keeping both in
+# the add-on initrd makes the immutable installed OS bit-identical to the live
+# OS and limits installer state to this signed companion image.
+mkfs.erofs --quiet --all-root -T"${stamp}" -zlz4hc \
+    "${addon_root}/proto-installer/sysext/proto-installer.raw" \
+    "${source}/mkosi.installer.sysext"
+cp -a "${source}/mkosi.installer.confext/." "${confext_root}/"
+cp -a "${source}/mkosi.installer.${desktop}.confext/." "${confext_root}/"
+if [[ ${desktop} == gnome ]]; then
+    rm -rf -- "${staging}"
+    install -d -m 0755 "${staging}/local.d"
+    cp -a "${confext_root}/etc/dconf/db/local.d/." "${staging}/local.d/"
+    chroot "${root}" /usr/bin/dconf compile \
+        /run/proto-installer-confext-build/local \
+        /run/proto-installer-confext-build/local.d
+    install -m 0644 "${staging}/local" "${confext_root}/etc/dconf/db/local"
+fi
+mkfs.erofs --quiet --all-root -T"${stamp}" -zlz4hc \
+    "${addon_root}/proto-installer/confext/proto-installer.raw" \
+    "${confext_root}"
+
+# Make the initrd reproducible independently of the checkout timestamps.
+find "${addon_root}" -exec touch --no-dereference --date="@${stamp}" {} +
+(
+    cd "${addon_root}"
+    find . -mindepth 1 -print0 | LC_ALL=C sort -z | \
+        cpio --quiet --null --create --format=newc --reproducible --owner=0:0
+) | zstd --quiet --threads=0 -19 -o "${work}/initrd.cpio.zst"
+
+
+stub=${root}/usr/lib/systemd/boot/efi/addon${efi_arch}.efi.stub
+[[ -f ${stub} ]] || { echo "systemd UKI add-on stub not found: ${stub}" >&2; exit 1; }
+mkdir -p "$(dirname "${output}")"
+ukify build \
+    --efi-arch="${efi_arch}" \
+    --stub="${stub}" \
+    --cmdline='root=tmpfs rootfstype=tmpfs rw systemd.volatile=yes' \
+    --initrd="${work}/initrd.cpio.zst" \
+    --sbat="@${source}/mkosi.installer.addon.sbat" \
+    --output="${output}"
+chmod 0644 "${output}"
