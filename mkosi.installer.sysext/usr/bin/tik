@@ -9,7 +9,7 @@
 # lowercase variables = internal, not expected to be defined by users
 # uppercase variables = user facing, expected to be set by config
 
-tik_log=~/tik.log
+tik_log=/var/lib/tik/log/tik.log
 tik_dir=/usr/lib/tik
 tik_module="tik"
 
@@ -19,6 +19,14 @@ tik_module="tik"
 . ${tik_dir}/lib/tik-core
 
 # Start logging
+umask 077
+if ! touch "${tik_log}"; then
+    echo "Cannot write installer log to ${tik_log}." >&2
+    exit 1
+fi
+if ! mountpoint -q /var/lib/tik; then
+    echo 'Warning: TIKSTATE is not mounted; the installer log will not survive a reboot.' >&2
+fi
 exec 2> >(exec tee -i -a "${tik_log}" >&2)
 logging=true
 log "[START] $0"

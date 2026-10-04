@@ -6,9 +6,9 @@ TIK_CUSTOM_DIR="/etc/tik"
 TIK_ROOT_PARTITION_LABEL="USER"
 TIK_ETC_SUBVOLUME="@etc"
 
-# The live medium must never be offered as an installation target. Deriving
-# its backing disk from the active mounts is authoritative; this label remains
-# a fallback for media built by TIK or older layouts.
+# The installer ESP has this filesystem label. Exclude every disk carrying
+# it, and additionally protect the actual running medium via its backing
+# device even if someone has changed its label.
 TIK_INSTALL_MEDIA_LABEL="TIKINSTALL"
 TIK_BIND_LIVE_USR=1
 

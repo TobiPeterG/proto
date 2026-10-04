@@ -13,6 +13,11 @@ if [[ -s /run/proto-installer-state-device ]]; then
     state="$(</run/proto-installer-state-device)"
     mount -t btrfs -o compress=zstd:1 "${state}" /sysroot/var/lib/tik
 fi
+# The state root contains private migration data. Permit traversal to the
+# installer-owned log directory only; do not expose other users' backups.
+chmod 0711 /sysroot/var/lib/tik
+install -d -m 0700 /sysroot/var/lib/tik/mig
+install -d -m 0700 -o 1000 -g 100 /sysroot/var/lib/tik/log
 cp -a "${factory}/." /sysroot/etc/
 install -d -m 0755 /sysroot/etc/extensions
 install -m 0644 /proto-installer/sysext/*.raw /sysroot/etc/extensions/

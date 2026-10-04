@@ -10,6 +10,12 @@ for mountpoint in /sysusr/usr /sysroot/usr; do
 done
 source="${source%%\[*}"
 [[ -n ${source} ]] || { echo 'proto installer: cannot find live /usr device' >&2; exit 0; }
+source="$(readlink -f -- "${source}")"
+[[ -b ${source} ]] || { echo 'proto installer: live /usr is not block-backed' >&2; exit 0; }
+# Keep this independent of optional TIKSTATE creation. The live desktop's
+# /usr will subsequently be an overlay and cannot identify its source disk.
+printf '%s\n' "${source}" >/run/proto-installer-source-device
+chmod 0644 /run/proto-installer-source-device
 
 disk="$(lsblk -snrpo PATH,TYPE "${source}" | awk '$2 == "disk" { print $1; exit }')"
 [[ -b ${disk} ]] || { echo "proto installer: cannot resolve live disk for ${source}" >&2; exit 0; }

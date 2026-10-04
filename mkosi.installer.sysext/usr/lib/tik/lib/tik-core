@@ -4,6 +4,7 @@
 
 # Helper functions for tik-core
 . ${tik_dir}/lib/tik-core-helper
+. ${tik_dir}/lib/tik-live-source
 
 tik_detect_identity() {
     if [[ -n ${TIK_OS_NAME:-} ]]; then
@@ -16,21 +17,6 @@ tik_detect_identity() {
 tik_assert_secure_boot() {
     /usr/lib/tik/libexec/tik-sysinstall --check-secure-boot ||
         error "Installation requires Secure Boot with shim validation enabled."
-}
-
-tik_source_disks() {
-    local mountpoint source
-
-    for mountpoint in / /usr /boot /efi; do
-        source="$(findmnt -nro SOURCE --target "${mountpoint}" 2>/dev/null || true)"
-        source="${source%%\[*}"
-        [[ -n "${source}" && -e "${source}" ]] || continue
-
-        lsblk -snrpo PATH,TYPE "${source}" 2>/dev/null |
-            awk '$2 == "disk" || $2 ~ /^raid/ { print $1 }'
-    done | while read -r source; do
-        readlink -f -- "${source}"
-    done | sort -u
 }
 
 tik_is_source_disk() {
@@ -49,7 +35,6 @@ tik_assert_safe_install_target() {
 }
 
 get_disk() {
-    tik_volid="${TIK_INSTALL_MEDIA_LABEL:-TIKINSTALL}"
     local disk_id="by-id"
     local disk_size
     local disk_device
@@ -61,7 +46,6 @@ get_disk() {
     local blk_opts="-p -n -r -o NAME,SIZE,TYPE"
     local message
     local blk_opts_plus_label="${blk_opts},LABEL"
-    local tik_install_disk_part
     local part_meta
     local part_count
     local part_size
@@ -71,16 +55,10 @@ get_disk() {
     local usb_match_1="usb"
     local usb_match_2=":0"
 
-    TIK_SOURCE_DISKS="$(tik_source_disks)"
+    TIK_SOURCE_DISKS="$(tik_source_disks)" || error "Cannot identify the live installation medium."
+    [[ -n ${TIK_SOURCE_DISKS} ]] || error "Cannot identify the live installation medium."
     export TIK_SOURCE_DISKS
     log "[get_disk] excluding live-system disk(s): ${TIK_SOURCE_DISKS:-none detected}"
-
-    tik_install_disk_part=$(
-        eval lsblk "${blk_opts_plus_label}" | \
-        tr -s ' ' ":" | \
-        grep ":${tik_volid}" | \
-        cut -f1 -d:
-    )
 
     for disk_meta in $(
         eval lsblk "${blk_opts}" | grep -E "disk|raid" | tr ' ' ":"
@@ -109,9 +87,6 @@ get_disk() {
         done
         if [[ ${part_count} -eq 0 ]]; then
             part_info="none"
-        fi
-        if [[ "${tik_install_disk_part}" == "${disk_device}"* ]]; then
-            continue
         fi
         if [[ ${disk_device} =~ ^/dev/fd ]]; then
             continue

@@ -3,6 +3,7 @@
 # SPDX-FileCopyrightText: Copyright 2026 Tobias Görgens
 
 set -euo pipefail
+. /usr/lib/tik/lib/tik-live-source
 
 tik_secure_boot_enabled() {
     local state
@@ -12,17 +13,14 @@ tik_secure_boot_enabled() {
 }
 
 tik_sysinstall_assert_target() {
-    local disk=$1 mountpoint source
+    local disk=$1 sources
     [[ -b ${disk} && $(lsblk -dnro TYPE "${disk}") == disk ]] || return 1
-    for mountpoint in / /usr /boot /efi; do
-        source="$(findmnt -nro SOURCE --target "${mountpoint}" 2>/dev/null || true)"
-        source="${source%%\[*}"
-        [[ -b ${source} ]] || continue
-        if lsblk -snrpo PATH "${source}" | grep -Fxq -- "${disk}"; then
-            echo "Refusing to overwrite the running system's disk: ${disk}" >&2
-            return 1
-        fi
-    done
+    sources="$(tik_source_disks)" || return 1
+    [[ -n ${sources} ]] || return 1
+    if grep -Fxq -- "${disk}" <<<"${sources}"; then
+        echo "Refusing to overwrite the running system's disk: ${disk}" >&2
+        return 1
+    fi
 }
 
 tik_sysinstall_deploy() {
@@ -106,11 +104,20 @@ tik_sysinstall_finish_boot() (
 )
 
 tik_sysinstall_worker() {
+    local source
+    source="$(tik_live_usr_device)"
+    # The source must remain the authenticated verity mapping, not its raw
+    # data partition. Fail before sysinstall can erase the destination.
+    veritysetup status "${source}" >/dev/null
     # CopyBlocks=auto requires the real /usr block device, not sysext's overlay.
     # This runs only in our private mount namespace, leaving the live desktop
     # and its installer extension merged in the parent's namespace. All helper
     # functions have already been sourced before their sysext disappears here.
     systemd-sysext --no-reload unmerge
+    # Explicitly cover any residual overlay/bind mount with the verified
+    # EROFS mount: repart's CopyBlocks=auto needs a block-backed /usr mount.
+    mount -t erofs -o ro "${source}" /usr
+    [[ $(findmnt -nro FSTYPE --target /usr) == erofs ]]
     tik_sysinstall_deploy "$@"
     tik_sysinstall_finish_boot "$1"
 }

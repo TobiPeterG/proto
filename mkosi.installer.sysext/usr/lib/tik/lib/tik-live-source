@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: MIT
+
+tik_live_usr_device() {
+    local source
+    # Recorded by the initrd before sysext overlays /usr. Do not guess a
+    # partition from another attached disk or copy the sysext's loop device.
+    if [[ -f /run/proto-installer-source-device &&
+          ! -L /run/proto-installer-source-device &&
+          $(stat -c %u /run/proto-installer-source-device) == 0 ]]; then
+        source="$(</run/proto-installer-source-device)"
+        if [[ -b ${source} ]]; then
+            readlink -f -- "${source}"
+            return
+        fi
+    fi
+    if [[ -b /dev/mapper/usr ]]; then
+        readlink -f -- /dev/mapper/usr
+        return
+    fi
+    echo 'Cannot identify the verified live /usr device.' >&2
+    return 1
+}
+
+tik_source_disks() {
+    local mountpoint source live_source
+    live_source="$(tik_live_usr_device)" || return 1
+    {
+        printf '%s\n' "${live_source}"
+        # Upstream TIK's filesystem-label exclusion, resolving partition
+        # ancestry instead of comparing /dev names by prefix. Multiple
+        # attached installer sticks must all be excluded.
+        lsblk -nrpo PATH,LABEL |
+            awk -v label="${TIK_INSTALL_MEDIA_LABEL:-TIKINSTALL}" \
+                '$2 == label { print $1 }'
+        for mountpoint in / /usr /boot /efi /var/lib/tik; do
+            source="$(findmnt -nro SOURCE --target "${mountpoint}" 2>/dev/null || true)"
+            source="${source%%\[*}"
+            [[ -b ${source} ]] && printf '%s\n' "${source}"
+        done
+        true
+    } | while read -r source; do
+        lsblk -snrpo PATH,TYPE "${source}" |
+            awk '$2 == "disk" || $2 ~ /^raid/ { print $1 }'
+    done | while read -r source; do
+        readlink -f -- "${source}"
+    done | sort -u
+}
