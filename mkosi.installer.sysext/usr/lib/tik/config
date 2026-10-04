@@ -2,7 +2,7 @@
 # Default: "/etc/tik"
 TIK_CUSTOM_DIR="/etc/tik"
 
-# TIK installs the system with systemd-sysinstall.
+# TIK installs the authenticated A set with systemd-repart.
 TIK_ROOT_PARTITION_LABEL="USER"
 TIK_ETC_SUBVOLUME="@etc"
 

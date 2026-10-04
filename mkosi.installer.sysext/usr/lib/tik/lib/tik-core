@@ -15,7 +15,7 @@ tik_detect_identity() {
 }
 
 tik_assert_secure_boot() {
-    /usr/lib/tik/libexec/tik-sysinstall --check-secure-boot ||
+    /usr/lib/tik/libexec/tik-repart --check-secure-boot ||
         error "Installation requires Secure Boot with shim validation enabled."
 }
 
@@ -181,7 +181,7 @@ install_system() {
     if [[ ${migrate:-0} == 1 ]]; then
         create_keyfile
     fi
-    prun /usr/lib/tik/libexec/tik-sysinstall "${target}" "${migrate:-0}" "${tik_keyfile:-}" \
+    prun /usr/lib/tik/libexec/tik-repart "${target}" "${migrate:-0}" "${tik_keyfile:-}" \
         > >(d --progress --title="Installing ${TIK_OS_NAME}" --text="Deploying verified system" --pulsate --auto-close --no-cancel --width=400)
 }
 

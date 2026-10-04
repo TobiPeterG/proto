@@ -1,0 +1,126 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: MIT
+"""Resolve the active verity A set and write repart source-only drop-ins."""
+import base64
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+import uuid
+
+
+def run(*args):
+    return subprocess.check_output(args, text=True, env={**os.environ, "LC_ALL": "C"}).strip()
+
+
+def flatten(nodes):
+    for node in nodes:
+        yield node
+        yield from flatten(node.get("children", []))
+
+
+def read_signature(path):
+    # Signature partitions contain one JSON document followed by NUL padding.
+    # Bound reads even if a malformed GPT describes an enormous partition.
+    with open(path, "rb") as stream:
+        data = stream.read(1024 * 1024)
+    return json.loads(data.split(b"\0", 1)[0])
+
+
+def select_sources(status, partitions, types, load_signature=read_signature):
+    fields = dict(re.findall(r"^\s*([a-z ]+):\s*(.*?)\s*$", status, re.MULTILINE))
+    if fields.get("type") != "VERITY" or not fields.get("status", "").startswith("verified"):
+        raise ValueError("live /usr is not a verified VERITY mapping")
+    if fields.get("mode") != "readonly":
+        raise ValueError("live /usr verity mapping is not read-only")
+    root_hash = fields.get("root hash", "").lower()
+    if not re.fullmatch(r"(?:[0-9a-f]{64}|[0-9a-f]{128})", root_hash):
+        raise ValueError("missing or unsupported live /usr root hash")
+
+    def find_device(field, expected_type):
+        device = os.path.realpath(fields.get(field, ""))
+        matches = [p for p in partitions if os.path.realpath(p["path"]) == device]
+        if len(matches) != 1 or (matches[0].get("parttype") or "").lower() != expected_type:
+            raise ValueError(f"{field} is not a unique partition of the expected GPT type")
+        return matches[0]
+
+    data = find_device("data device", types[0])
+    hashes = find_device("hash device", types[1])
+    # These UUIDs identify the partitions when booting the unchanged signed UKI.
+    if uuid.UUID(data["partuuid"]) != uuid.UUID(root_hash[:32]):
+        raise ValueError("usr partition UUID does not match the active root hash")
+    if uuid.UUID(hashes["partuuid"]) != uuid.UUID(root_hash[-32:]):
+        raise ValueError("usr-verity partition UUID does not match the active root hash")
+    signatures = []
+    for partition in partitions:
+        if (partition.get("parttype") or "").lower() != types[2]:
+            continue
+        try:
+            document = load_signature(partition["path"])
+            if document.get("rootHash", "").lower() != root_hash:
+                continue
+            if not base64.b64decode(document["signature"], validate=True):
+                continue
+            signatures.append(partition)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            continue
+    if len(signatures) != 1:
+        raise ValueError("expected exactly one usr-verity-sig partition matching the active root hash")
+    return [data, hashes, signatures[0]]
+
+
+def write_dropins(definitions, output, sources):
+    for kind, source in zip(("usr", "usr-verity", "usr-verity-sig"), sources):
+        matches = []
+        for definition in definitions.glob("*.conf"):
+            text = definition.read_text()
+            if re.search(rf"^Type={kind}\s*$", text, re.MULTILINE) and re.search(
+                r"^CopyBlocks=auto\s*$", text, re.MULTILINE
+            ):
+                matches.append(definition)
+        if len(matches) != 1:
+            raise ValueError(f"expected one canonical CopyBlocks=auto definition for {kind}")
+        device = os.path.realpath(source["path"])
+        if not re.fullmatch(r"/dev/[A-Za-z0-9_./+-]+", device):
+            raise ValueError("unsafe source device path")
+        partition_uuid = str(uuid.UUID(source["partuuid"]))
+        directory = output / (matches[0].name + ".d")
+        directory.mkdir(mode=0o700, parents=True)
+        (directory / "90-tik-source.conf").write_text(
+            f"[Partition]\nCopyBlocks={device}\nUUID={partition_uuid}\n"
+        )
+        print(f"TIK repart source: {kind}: {device}, UUID={partition_uuid}", file=sys.stderr)
+
+
+def main():
+    mapper, definitions, output = sys.argv[1:]
+    if os.geteuid() != 0 or not stat.S_ISBLK(os.stat(mapper).st_mode):
+        raise ValueError("source resolution requires root and a block device")
+    status = run("veritysetup", "status", mapper)
+    fields = dict(re.findall(r"^\s*([a-z ]+):\s*(.*?)\s*$", status, re.MULTILINE))
+    ancestors = run("lsblk", "-snrpo", "PATH,TYPE", fields["data device"])
+    disks = {line.split()[0] for line in ancestors.splitlines() if line.split()[-1] == "disk"}
+    if len(disks) != 1:
+        raise ValueError("expected one physical live source disk")
+    disk = disks.pop()
+    partitions = list(flatten(json.loads(run(
+        "lsblk", "--json", "--paths", "--output", "PATH,PARTTYPE,PARTUUID", disk
+    ))["blockdevices"]))
+    types = [str(uuid.UUID(value)) for value in run(
+        "systemd-id128", "show", "--value", "usr", "usr-verity", "usr-verity-sig"
+    ).splitlines()]
+    sources = select_sources(status, partitions, types)
+    for source in sources:
+        if not stat.S_ISBLK(os.stat(source["path"]).st_mode):
+            raise ValueError("partition source is not a block device")
+    write_dropins(Path(definitions), Path(output), sources)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
+        sys.exit(f"TIK: cannot resolve authenticated A partition sources: {error}")

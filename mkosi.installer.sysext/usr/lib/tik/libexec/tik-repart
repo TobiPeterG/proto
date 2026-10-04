@@ -12,7 +12,7 @@ tik_secure_boot_enabled() {
         ! grep -qi 'validation is disabled' <<<"${state}"
 }
 
-tik_sysinstall_assert_target() {
+tik_repart_assert_target() {
     local disk=$1 sources
     [[ -b ${disk} && $(lsblk -dnro TYPE "${disk}") == disk ]] || return 1
     sources="$(tik_source_disks)" || return 1
@@ -23,38 +23,30 @@ tik_sysinstall_assert_target() {
     fi
 }
 
-tik_sysinstall_deploy() {
-    local disk=$1 migration=$2 keyfile=$3
-
-    # sysinstall 261 defers Format=empty and FactoryReset=yes partitions.
-    # This copies the authenticated A set and installs the running UKI, using
-    # the canonical definitions; no raw image or second layout is needed.
-    systemd-sysinstall --definitions=/usr/lib/repart.d \
-        --erase=yes --confirm=no --welcome=no --summary=no --chrome=no \
-        --variables=no --reboot=no \
-        --copy-locale=no --copy-keymap=no --copy-timezone=no "${disk}"
-
-    # Only migration needs USER (and the complete layout) before first boot.
-    # Without migration the installed initrd's repart creates both B and USER.
-    # sysinstall currently has no key-file/defer override for this operation.
-    # TODO(systemd-sysinstall): Fold this completion step into sysinstall when
-    # it can provision a FactoryReset USER partition with a caller-supplied key.
+tik_repart_deploy() {
+    local disk=$1 migration=$2 keyfile=$3 overrides=$4
+    local -a options
+    # Only migration needs B and encrypted USER before first boot. Both
+    # flags must be explicit so installation never formats USER without a key.
     if [[ ${migration} == 1 ]]; then
-        systemd-repart --no-pager --pretty=no --empty=allow --dry-run=no \
-            --definitions=/usr/lib/repart.d --copy-source=/ \
-            --key-file="${keyfile}" "${disk}"
+        options=(--defer-partitions-empty=no --defer-partitions-factory-reset=no --key-file="${keyfile}")
+    else
+        options=(--defer-partitions-empty=yes --defer-partitions-factory-reset=yes)
     fi
+    systemd-repart --no-pager --pretty=no --empty=force --dry-run=no \
+        --definitions="${overrides}" --definitions=/usr/lib/repart.d \
+        --copy-source=/ "${options[@]}" "${disk}"
     udevadm settle --timeout=60
 }
 
-tik_sysinstall_finish_boot() (
-    local disk=$1 work esp xboot entry uki
+tik_repart_finish_boot() (
+    local disk=$1 work esp xboot
     esp="$(lsblk -nrpo PATH,PARTTYPE "${disk}" |
         awk 'tolower($2) == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" {print $1; exit}')"
     xboot="$(lsblk -nrpo PATH,PARTTYPE "${disk}" |
         awk 'tolower($2) == "bc13c2ff-59e6-4262-a352-b275fd6f7172" {print $1; exit}')"
     [[ -b ${esp} && -b ${xboot} ]] || return 1
-    work="$(mktemp -d /run/tik-sysinstall.XXXXXXXX)"
+    work="$(mktemp -d /run/tik-repart-boot.XXXXXXXX)"
     cleanup() {
         local result=$?
         trap - EXIT
@@ -72,27 +64,10 @@ tik_sysinstall_finish_boot() (
     mount -t vfat -o rw "${esp}" "${work}/efi"
     mount -t vfat -o rw "${xboot}" "${work}/boot"
 
-    # sysinstall's bootctl installs /usr's vendor binary, not OBS's signed
-    # copy, and would bypass shim. Restore the already signed live ESP chain.
-    # TODO(systemd-sysinstall): Use native shim/signed-loader installation once
-    # supported. --variables=no keeps registration in TIK's shim-aware path.
-    [[ -f /efi/EFI/BOOT/BOOTX64.EFI && -f /efi/EFI/BOOT/grub.EFI &&
-       -f /efi/EFI/systemd/systemd-bootx64.efi ]] || return 1
-    cp -r /efi/EFI/. "${work}/efi/EFI/"
-    cp /efi/loader/loader.conf "${work}/efi/loader/loader.conf"
-
-    # sysinstall also links a duplicate UKI as a type-1 entry. Proto's native
-    # sysupdate transfer manages type-2 entries in EFI/Linux. Unlink only the
-    # duplicates whose canonical UKI exists; do not retain a stale boot entry
-    # outside sysupdate's version/boot-counting lifecycle.
-    shopt -s nullglob
-    for entry in "${work}/boot/loader/entries/"*.conf; do
-        uki="$(awk '$1 == "uki" { print $2; exit }' "${entry}")"
-        [[ -n ${uki} && ${uki} != /EFI/Linux/* &&
-           -f ${work}/boot/EFI/Linux/${uki##*/} ]] || continue
-        bootctl --esp-path="${work}/efi" --boot-path="${work}/boot" \
-            --no-variables unlink "${entry##*/}"
-    done
+    # Canonical CopyFiles= definitions already copy the OBS-signed boot chain
+    # and native type-2 UKIs. No bootctl/kernel-install replacement is needed.
+    [[ -f ${work}/efi/EFI/BOOT/BOOTX64.EFI && -f ${work}/efi/EFI/BOOT/grub.EFI &&
+       -f ${work}/efi/EFI/systemd/systemd-bootx64.efi ]] || return 1
     [[ -n $(find "${work}/boot/EFI/Linux" -maxdepth 1 -type f -name '*.efi' -print -quit) ]] || return 1
     # Only the installer role disappears; other companions remain untouched.
     find "${work}/boot/EFI/Linux" -mindepth 2 -maxdepth 2 -type f \
@@ -103,22 +78,28 @@ tik_sysinstall_finish_boot() (
     sync -f "${work}/efi"
 )
 
-tik_sysinstall_worker() {
-    local source details fstype mounted_source
+tik_repart_worker() (
+    local source details fstype mounted_source work
     source="$(tik_live_usr_device)"
+    work="$(mktemp -d /run/tik-repart-sources.XXXXXXXX)"
+    trap 'rm -rf -- "${work}"' EXIT
+    # Resolve before unmerging: this Python helper lives in the installer
+    # sysext. The resulting drop-ins override sources/UUIDs only, not layout.
+    /usr/bin/python3 "${BASH_SOURCE[0]%/*}/tik-repart-sources" \
+        "${source}" /usr/lib/repart.d "${work}"
     # The source must remain the authenticated verity mapping, not its raw
-    # data partition. Fail before sysinstall can erase the destination.
+    # data partition. Fail before repart can erase the destination.
     if ! veritysetup status "${source}" >/dev/null; then
         echo "Live /usr source is not an active verity mapping: ${source}" >&2
         return 1
     fi
-    # CopyBlocks=auto requires the real /usr block device, not sysext's overlay.
+    # Expose the real /usr, not the installer sysext, for canonical CopyFiles=.
     # This runs only in our private mount namespace, leaving the live desktop
     # and its installer extension merged in the parent's namespace. All helper
     # functions have already been sourced before their sysext disappears here.
     systemd-sysext --no-reload unmerge
     # Explicitly cover any residual overlay/bind mount with the verified
-    # EROFS mount: repart's CopyBlocks=auto needs a block-backed /usr mount.
+    # EROFS mount so factory /etc and USER's skeleton come from the base OS.
     if ! mount -t erofs -o ro "${source}" /usr; then
         echo "Failed to mount verified live /usr from ${source}." >&2
         return 1
@@ -135,11 +116,11 @@ tik_sysinstall_worker() {
         echo "Unexpected live /usr mount: ${details}; expected erofs from ${source}." >&2
         return 1
     fi
-    tik_sysinstall_deploy "$@"
-    tik_sysinstall_finish_boot "$1"
-}
+    tik_repart_deploy "$@" "${work}"
+    tik_repart_finish_boot "$1"
+)
 
-tik_sysinstall_main() {
+tik_repart_main() {
     if [[ ${1:-} == --check-secure-boot && $# == 1 ]]; then
         tik_secure_boot_enabled
         return
@@ -152,8 +133,8 @@ tik_sysinstall_main() {
     local disk migration=$2 keyfile=$3
     disk="$(readlink -f -- "$1")"
     [[ ${migration} == 0 || ${migration} == 1 ]] || return 1
-    tik_sysinstall_assert_target "${disk}"
-    command -v systemd-sysinstall >/dev/null
+    tik_repart_assert_target "${disk}"
+    command -v systemd-repart >/dev/null
     if [[ ${migration} == 1 ]]; then
         [[ -f ${keyfile} && ! -L ${keyfile} &&
            $(stat -c '%u:%a' "${keyfile}") == 0:400 ]] || return 1
@@ -161,10 +142,10 @@ tik_sysinstall_main() {
         [[ -z ${keyfile} ]] || return 1
     fi
     unshare --mount --propagation=private /usr/bin/bash -c \
-        'source "$1"; shift; tik_sysinstall_worker "$@"' \
+        'source "$1"; shift; tik_repart_worker "$@"' \
         bash "${BASH_SOURCE[0]}" "${disk}" "${migration}" "${keyfile}"
 }
 
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
-    tik_sysinstall_main "$@"
+    tik_repart_main "$@"
 fi
