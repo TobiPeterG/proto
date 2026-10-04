@@ -104,11 +104,14 @@ tik_sysinstall_finish_boot() (
 )
 
 tik_sysinstall_worker() {
-    local source
+    local source details fstype mounted_source
     source="$(tik_live_usr_device)"
     # The source must remain the authenticated verity mapping, not its raw
     # data partition. Fail before sysinstall can erase the destination.
-    veritysetup status "${source}" >/dev/null
+    if ! veritysetup status "${source}" >/dev/null; then
+        echo "Live /usr source is not an active verity mapping: ${source}" >&2
+        return 1
+    fi
     # CopyBlocks=auto requires the real /usr block device, not sysext's overlay.
     # This runs only in our private mount namespace, leaving the live desktop
     # and its installer extension merged in the parent's namespace. All helper
@@ -116,8 +119,22 @@ tik_sysinstall_worker() {
     systemd-sysext --no-reload unmerge
     # Explicitly cover any residual overlay/bind mount with the verified
     # EROFS mount: repart's CopyBlocks=auto needs a block-backed /usr mount.
-    mount -t erofs -o ro "${source}" /usr
-    [[ $(findmnt -nro FSTYPE --target /usr) == erofs ]]
+    if ! mount -t erofs -o ro "${source}" /usr; then
+        echo "Failed to mount verified live /usr from ${source}." >&2
+        return 1
+    fi
+    # /usr can have several stacked mounts. Validate only the topmost one,
+    # not the concatenated output for every mount at that path.
+    if ! details="$(findmnt --first-only --direction backward -nro FSTYPE,SOURCE --target /usr)"; then
+        echo 'Cannot inspect the verified live /usr mount.' >&2
+        return 1
+    fi
+    read -r fstype mounted_source <<<"${details}"
+    mounted_source="${mounted_source%%\[*}"
+    if [[ ${fstype} != erofs || $(readlink -f -- "${mounted_source}") != "${source}" ]]; then
+        echo "Unexpected live /usr mount: ${details}; expected erofs from ${source}." >&2
+        return 1
+    fi
     tik_sysinstall_deploy "$@"
     tik_sysinstall_finish_boot "$1"
 }

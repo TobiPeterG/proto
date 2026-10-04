@@ -10,14 +10,17 @@ home_size=0
 tik_stick_size=0
 
 clear_migration_backup() {
-    local backup
+    local backup backups
 
-    if [ -d "${homes_dir}" ]; then
-        for backup in "${homes_dir}"/*; do
-            [ -e "${backup}" ] || continue
+    # mig is root-only because it contains private account data. Enumerate
+    # backups with TIK's privilege helper rather than an unprivileged glob.
+    backups="$(prun /usr/bin/find "${mig_dir}" -mindepth 2 -maxdepth 2 \
+        -path "${homes_dir}/*" -type d -print)" || error "Cannot list migration backups."
+    if [[ -n ${backups} ]]; then
+        while IFS= read -r backup; do
             prun-opt /usr/sbin/btrfs property set -f -ts "${backup}" ro false
             prun-opt /usr/sbin/btrfs subvolume delete "${backup}"
-        done
+        done <<<"${backups}"
         prun-opt /usr/bin/rmdir "${homes_dir}"
     fi
 
@@ -39,7 +42,8 @@ if [ ! -d "${mig_dir}" ]; then
     prun /usr/bin/mkdir -p "${mig_dir}"
 fi
 
-if [ -n "$(ls -A "${mig_dir}")" ]; then
+backup_entries="$(prun /usr/bin/ls -A "${mig_dir}")" || error "Cannot inspect migration backup state."
+if [ -n "${backup_entries}" ]; then
     log "[mig] existing backup found"
     d_opt --question --no-wrap --cancel-label="No, Delete Backup"         --title="Existing user backup detected"         --text="These users can be restored to the new installation\n\nWould you like to use this backup?"
     oldbackupyn=$?
