@@ -1,0 +1,14 @@
+[Unit]
+Description=Mount the Proto USER filesystem top level
+DefaultDependencies=no
+ConditionKernelCommandLine=!systemd.volatile=yes
+ConditionKernelCommandLine=!root=tmpfs
+Requires=sysroot.mount
+After=sysroot.mount
+Before=proto-etc-prepare.service sysroot-etc.mount initrd-switch-root.target
+
+[Mount]
+What=/dev/gpt-auto-root
+Where=/sysroot/.system
+Type=btrfs
+Options=subvol=/,nodev,nosuid,x-gvfs-hide,x-gdu.hide

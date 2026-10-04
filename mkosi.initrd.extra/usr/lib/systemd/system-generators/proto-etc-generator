@@ -9,6 +9,8 @@ esac
 
 # No dependency on USER mounts is pulled into the volatile live environment.
 # Installed boots must mount their versioned /etc before switching root.
+# sysroot-etc.mount pulls in proto-etc-prepare.service, which requires the
+# native sysroot-.system.mount.
 for unit in initrd-parse-etc.service initrd-switch-root.target; do
     install -d -m 0755 "${1}/${unit}.requires"
     ln -sf /usr/lib/systemd/system/sysroot-etc.mount \
