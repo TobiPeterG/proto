@@ -68,7 +68,7 @@ if [ -z "${skipbackup}" ]; then
     case "$?" in
         0) ;;
         *)
-            log "[mig] no migratable Proto system found, skipping migration"
+            log "[mig] no migratable system found, skipping migration"
             migrate=0
             return 0
             ;;
@@ -106,7 +106,7 @@ if [ -z "${skipbackup}" ]; then
     fi
 
     if [ -z "${migrate}" ]; then
-        d_opt --question --no-wrap --title="Backup users from the existing Proto install?"             --text="The following Btrfs home subvolumes will be restored:\n\n${home_list}"
+        d_opt --question --no-wrap --title="Backup users from the existing install?"             --text="The following Btrfs home subvolumes will be restored:\n\n${home_list}"
         migrateyn=$?
         if [ "${migrateyn}" == 0 ]; then
             migrate=1
@@ -152,7 +152,7 @@ if [ -z "${skipbackup}" ]; then
 fi
 
 if [[ ${migrate:-0} == 1 ]]; then
-    tik_collect_install_passphrase
+    [[ -n ${TIK_INSTALL_PASSPHRASE:-} ]] || tik_collect_install_passphrase
 else
     log "[encrypt] USER provisioning deferred to first boot"
 fi

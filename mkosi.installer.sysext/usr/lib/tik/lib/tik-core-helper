@@ -47,6 +47,37 @@ tik_read_info_from_root() {
     return 0
 }
 
+tik_read_info_from_image() {
+    local image_path="$1"
+    local mnt
+    local osr
+
+    TIK_DETECTED_PRETTY_NAME=""
+    TIK_DETECTED_ID=""
+
+    mnt="$(mktemp -d /tmp/tik-dissect.XXXXXXXXXX)"
+    osr="${mnt}/etc/os-release"
+
+    # If this takes too long or fails, we just give up and fall back.
+    prun-opt /usr/bin/timeout 1s /usr/bin/systemd-dissect --quiet --mount "${image_path}" "${mnt}"
+    if [ "${retval}" != "0" ]; then
+        prun-opt /usr/bin/rmdir "${mnt}"
+        return 1
+    fi
+
+    if [ -f "${osr}" ]; then
+        TIK_DETECTED_PRETTY_NAME="$(. "${osr}" 2>/dev/null; echo "${PRETTY_NAME}")"
+        TIK_DETECTED_ID="$(. "${osr}" 2>/dev/null; echo "${ID}")"
+    fi
+
+    prun-opt /usr/bin/umount "${mnt}"
+    prun-opt /usr/bin/rmdir "${mnt}"
+
+    [ -n "${TIK_DETECTED_PRETTY_NAME}" ] || return 1
+    [ -n "${TIK_DETECTED_ID}" ] || return 1
+    return 0
+}
+
 tik_set_identity() {
     local pretty="$1"
     local raw_id="$2"
@@ -85,6 +116,69 @@ tik_set_identity_for_selfdeploy() {
     fi
     tik_set_identity_unknown
     return 0
+}
+
+tik_set_identity_for_image() {
+    local img="$1"
+    local base
+    local token
+
+    if tik_read_info_from_image "${TIK_IMG_DIR}/${img}"; then
+        tik_set_identity "${TIK_DETECTED_PRETTY_NAME}" "${TIK_DETECTED_ID}"
+        return 0
+    fi
+
+    base="$(basename "${img}")"
+    base="${base%.raw}"
+    base="${base%.xz}"
+
+    token="$(echo "${base}" | sed -nE 's/^tik-osimage-([^-\.\ ]+).*/\1/p')"
+    if [ -n "${token}" ]; then
+        TIK_OS_NAME="${token}"
+        export TIK_OS_NAME
+
+        TIK_OS_ID="$(tik_sanitize_os_id "${token}")"
+        [ -n "${TIK_OS_ID}" ] || TIK_OS_ID="cr"
+        export TIK_OS_ID
+
+        TIK_CRYPT_MAPPER="${TIK_OS_ID}_root"
+        export TIK_CRYPT_MAPPER
+        return 0
+    fi
+
+    tik_set_identity_unknown
+    return 0
+}
+
+tik_read_info_from_images() {
+    # If multiple images are available and all have the same ID & PRETTY_NAME, use that.
+    # Returns 0 if identity was set, otherwise 1.
+    local img
+    local first_pretty=""
+    local first_id=""
+    local ok=1
+
+    for img in "$@"; do
+        if ! tik_read_info_from_image "${TIK_IMG_DIR}/${img}"; then
+            ok=0
+            break
+        fi
+        if [ -z "${first_pretty}" ]; then
+            first_pretty="${TIK_DETECTED_PRETTY_NAME}"
+            first_id="${TIK_DETECTED_ID}"
+        else
+            if [ "${TIK_DETECTED_PRETTY_NAME}" != "${first_pretty}" ] || [ "${TIK_DETECTED_ID}" != "${first_id}" ]; then
+                ok=0
+                break
+            fi
+        fi
+    done
+
+    if [ "${ok}" = "1" ] && [ -n "${first_pretty}" ] && [ -n "${first_id}" ]; then
+        tik_set_identity "${first_pretty}" "${first_id}"
+        return 0
+    fi
+    return 1
 }
 
 get_persistent_device_from_unix_node() {
@@ -195,6 +289,63 @@ tik_prepare_install_target() {
 
     prun-opt /usr/bin/udevadm settle --timeout=60
     prun-opt /usr/sbin/blockdev --flushbufs "${target}"
+}
+
+dump_image_dd() {
+    local image_source_files=$1
+    local image_target=$2
+    log "[dump_image_dd] deploying ${TIK_IMG_DIR}/${image_source_files}"
+    # Capture the copy pipeline's status, not the progress dialog's exit code.
+    (set -o pipefail; xzcat "${TIK_IMG_DIR}/${image_source_files}" |
+        pv -f -F "# %b copied in %t %r" |
+        prun /usr/bin/dd of="${image_target}" bs=64k) \
+        > >(d --progress --title="Installing ${TIK_OS_NAME}" --pulsate --auto-close --no-cancel --width=400)
+    local copy_result=$?
+    [[ ${copy_result} == 0 ]] || error "Image copy failed (exit ${copy_result}); see ${tik_log}."
+    prun /usr/bin/sync > >(d --progress --title="Syncing" --pulsate --auto-close --no-cancel --width=400)
+}
+
+dump_image_repart_image() {
+    local image_source_files=$1
+    local image_target=$2
+    local success=0
+    local max_attempts=5
+    local attempt_num=1
+
+    create_keyfile
+    log "[dump_image_repart_image] deploying ${TIK_IMG_DIR}/${image_source_files}"
+
+    while [ ${success} = 0 ] && [ ${attempt_num} -lt ${max_attempts} ]; do
+        prun-opt systemd-repart --no-pager --pretty=0 --empty=force --dry-run=no --key-file="${tik_keyfile}" --image="${TIK_IMG_DIR}/${image_source_files}" --image-policy=root=unprotected "${image_target}" > >(d --progress --title="Installing ${TIK_OS_NAME}" --text="Deploying OS Image" --pulsate --auto-close --no-cancel --width=400)
+        if [ ${retval} -eq 0 ]; then
+            success=1
+        else
+            log "[dump_image_repart_image] systemd-repart attempt ${attempt_num} failed. Trying again..."
+            sleep 1
+            attempt_num=$(( attempt_num + 1 ))
+        fi
+    done
+    if [ ${success} = 1 ]; then
+        log "[dump_image_repart_image] systemd-repart succeeded after ${attempt_num} attempts"
+    else
+        error "systemd-repart failed"
+    fi
+}
+
+dump_image_repart_self() {
+    local image_target=$1
+    if [[ -n ${TIK_DEPLOY_COMMAND:-} ]]; then
+        [[ ${migrate:-0} != 1 ]] || create_keyfile
+        log "[dump_image_repart_self] backend=${TIK_DEPLOY_COMMAND} target=${image_target} migration=${migrate:-0}"
+        [[ -x ${TIK_DEPLOY_COMMAND} ]] || error "Deployment helper is missing: ${TIK_DEPLOY_COMMAND}"
+        prun "${TIK_DEPLOY_COMMAND}" "${image_target}" "${migrate:-0}" "${tik_keyfile:-}" \
+            > >(d --progress --title="Installing ${TIK_OS_NAME}" --text="Deploying OS" --pulsate --auto-close --no-cancel --width=400)
+        return
+    fi
+    create_keyfile
+    prun-opt /usr/bin/rm -f -- /etc/fstab.repart
+    log "[dump_image_repart_self] self-deploying"
+    prun systemd-repart --no-pager --pretty=0 --empty=force --dry-run=no --key-file="${tik_keyfile}" --generate-fstab=/etc/fstab.repart "${image_target}" > >(d --progress --title="Installing ${TIK_OS_NAME}" --text="Deploying OS Image" --pulsate --auto-close --no-cancel --width=400)
 }
 
 tik_target_unmount() {

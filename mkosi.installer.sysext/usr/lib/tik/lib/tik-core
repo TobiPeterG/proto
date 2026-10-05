@@ -7,16 +7,62 @@
 . ${tik_dir}/lib/tik-live-source
 
 tik_detect_identity() {
-    if [[ -n ${TIK_OS_NAME:-} ]]; then
-        [[ -n ${TIK_CRYPT_MAPPER:-} ]] || tik_set_identity_from_name "${TIK_OS_NAME}"
-    else
-        tik_set_identity_for_selfdeploy
-    fi
-}
+    # establish TIK_OS_NAME + TIK_CRYPT_MAPPER.
+    # Priority:
+    # 0. Config provided => keep it
+    # 1. Selfdeploy (no images found) => read /etc/os-release
+    # 2. One image => try read os-release from image; else name fallback
+    # 3. Multiple images => if all match => use that; else fallback to TIK now
 
-tik_assert_secure_boot() {
-    /usr/lib/tik/libexec/tik-repart --check-secure-boot ||
-        error "Installation requires Secure Boot with shim validation enabled."
+    # If config already provided identity, prefer it
+    if [ -n "${TIK_OS_NAME}" ]; then
+        if [ -n "${TIK_CRYPT_MAPPER}" ]; then
+            export TIK_OS_NAME
+            export TIK_CRYPT_MAPPER
+            return 0
+        fi
+
+        # Only OS name provided -> derive ID + mapper from sanitized name
+        tik_set_identity_from_name "${TIK_OS_NAME}"
+        return 0
+    fi
+
+    local imgs=""
+    local file_type
+    local img_meta
+    local img_filename
+    local count=0
+
+    for file_type in '*.raw.xz' '*.raw'; do
+        for img_meta in $(cd "${TIK_IMG_DIR}" && (stat --printf="%n\t%s\n" ${file_type} 2>/dev/null | tr '	' ":")); do
+            img_filename="$(echo "${img_meta}" | cut -f1 -d:)"
+            imgs="${imgs} ${img_filename}"
+            count=$((count + 1))
+        done
+    done
+
+    if [ -n "${TIK_INSTALL_IMAGE}" ]; then
+        # If config pins an image, treat as single-image identity source.
+        tik_set_identity_for_image "${TIK_INSTALL_IMAGE}"
+        return 0
+    fi
+
+    if [ "${count}" -eq 0 ]; then
+        tik_set_identity_for_selfdeploy
+        return 0
+    fi
+
+    if [ "${count}" -eq 1 ]; then
+        tik_set_identity_for_image ${imgs}
+        return 0
+    fi
+
+    if tik_read_info_from_images ${imgs}; then
+        return 0
+    fi
+
+    tik_set_identity_unknown
+    return 0
 }
 
 tik_is_source_disk() {
@@ -31,6 +77,18 @@ tik_assert_safe_install_target() {
 
     if tik_is_source_disk "${target}"; then
         error "Refusing to install to the disk backing the running live system: ${target}"
+    fi
+}
+
+tik_assert_secure_boot() {
+    local state
+    if [[ -n ${TIK_DEPLOY_COMMAND:-} ]]; then
+        "${TIK_DEPLOY_COMMAND}" --check-secure-boot || error "Installation requires Secure Boot with shim validation enabled."
+    else
+        state="$(LC_ALL=C mokutil --sb-state 2>/dev/null)" || error "Cannot determine Secure Boot state."
+        grep -Fxq 'SecureBoot enabled' <<<"${state}" &&
+            ! grep -qi 'validation is disabled' <<<"${state}" ||
+            error "Installation requires Secure Boot with shim validation enabled."
     fi
 }
 
@@ -165,6 +223,75 @@ get_disk() {
     fi
 }
 
+get_img() {
+    local list_items
+    local message
+    local img_meta
+    local img_list
+    local img_array
+    local file_type
+
+    for file_type in '*.raw.xz' '*.raw'; do
+        for img_meta in $(cd "${TIK_IMG_DIR}" && (stat --printf="%n\t%s\n" ${file_type} 2>/dev/null | tr '	' ":")); do
+            img_filename="$(echo "${img_meta}" | cut -f1 -d:)"
+            img_size="$(echo "${img_meta}" | cut -f2 -d:)"
+            list_items="${list_items} ${img_filename} ${img_size}"
+        done
+    done
+
+    if [ -n "${TIK_INSTALL_IMAGE}" ]; then
+        local img=${TIK_INSTALL_IMAGE}
+        local img_size
+        if [ ! -e "${TIK_IMG_DIR}/${img}" ]; then
+            local no_img="Given image <tt>${img}</tt> does not exist."
+            error "${no_img}"
+        fi
+        if [ ! -s "${TIK_IMG_DIR}/${img}" ]; then
+            local empty_img="Given image <tt>${img}</tt> is empty."
+            error "${empty_img}"
+        fi
+        img_meta=$(
+            eval cd "${TIK_IMG_DIR}" && (stat --printf="%n\t%s\n" "${img}" | tr '	' ":")
+        )
+        img_filename="$(echo "${img_meta}" | cut -f1 -d:)"
+        img_size="$(echo "${img_meta}" | cut -f2 -d:)"
+        list_items="${img_filename} ${img_size}"
+        message="[get_disk] tik installation image set to to: ${img}"
+        log "${message}"
+    fi
+
+    if [ -z "${list_items}" ]; then
+        TIK_INSTALL_IMAGE='TIK_SELFDEPLOY'
+        return 0
+    fi
+
+    img_list=${list_items}
+    if [ -n "${img_list}" ]; then
+        local count=0
+        local img_index=0
+        for entry in ${img_list}; do
+            if [ $((count % 2)) -eq 0 ]; then
+                img_array[${img_index}]=${entry}
+                img_index=$((img_index + 1))
+            fi
+            count=$((count + 1))
+        done
+        if [ "${img_index}" -eq 1 ]; then
+            TIK_INSTALL_IMAGE="${img_array[0]}"
+        else
+            d --list --column=Image --column=Size --title="Select A Image" --text="Select the operating system image to install.\n" ${list_items}
+            TIK_INSTALL_IMAGE="${result}"
+        fi
+    fi
+
+    # If identity was TIK due to multi-image mismatch, finalize it now from the selected image.
+    if [ "${TIK_INSTALL_IMAGE}" != "TIK_SELFDEPLOY" ]; then
+        if [ "${TIK_OS_NAME}" = "TIK" ] || [ -z "${TIK_CRYPT_MAPPER}" ]; then
+            tik_set_identity_for_image "${TIK_INSTALL_IMAGE}"
+        fi
+    fi
+}
+
 reread_partitiontable() {
     log "[reread_partitiontable] Re-reading partition table"
     sleep 3
@@ -172,17 +299,33 @@ reread_partitiontable() {
     sleep 3
 }
 
-install_system() {
-    local target=$1
-    tik_assert_secure_boot
-    d --question --no-wrap --title="Begin Installation?" --text="Once installation begins, changes to the selected disk are irreversible.\n\n<b>Proceeding will fully erase the disk.</b>\n\nContinue?"
+dump_image() {
+    local image_source_files=$1
+    local image_target=$2
+
+    d --question --no-wrap --title="Begin Installation?" --text="Once the installation begins the changes to the selected disk are irreversible.\n\n<b>Proceeding will fully erase the disk.</b>\n\nContinue with installation?"
+
     [[ ${retval} == 0 ]] || error "Installation cancelled"
-    tik_prepare_install_target "${target}"
-    if [[ ${migrate:-0} == 1 ]]; then
-        create_keyfile
+    tik_assert_secure_boot
+    tik_assert_safe_install_target "${image_target}"
+    if [[ ${TIK_SELFDEPLOY_ONLY:-0} == 1 && ${image_source_files} != TIK_SELFDEPLOY ]]; then
+        error "This OS only supports verified self-deployment."
     fi
-    prun /usr/lib/tik/libexec/tik-repart "${target}" "${migrate:-0}" "${tik_keyfile:-}" \
-        > >(d --progress --title="Installing ${TIK_OS_NAME}" --text="Deploying verified system" --pulsate --auto-close --no-cancel --width=400)
+    tik_prepare_install_target "${image_target}"
+    log "[dump_image] source=${image_source_files} target=${image_target}"
+    case "${image_source_files}" in
+        *.raw.xz)
+            dump_image_dd "${image_source_files}" "${image_target}"
+            ;;
+        *.raw)
+            dump_image_repart_image "${image_source_files}" "${image_target}"
+            ;;
+        TIK_SELFDEPLOY)
+            dump_image_repart_self "${image_target}"
+            ;;
+        *)
+            error "invalid image type provided"
+    esac
 }
 
 set_boot_target() {
@@ -206,7 +349,7 @@ set_boot_target() {
 
         # TIK_ESP_PART is already set during mounting
         efipartnum=$(lsblk "${TIK_ESP_PART}" -p -n -r -o PARTN)
-        prun /usr/sbin/efibootmgr -c -L "${TIK_OS_NAME} Boot Manager" -d "${TIK_INSTALL_DEVICE}" -l "\EFI\BOOT\BOOTX64.EFI" -p ${efipartnum}
+        prun /usr/sbin/efibootmgr -c -L "${TIK_OS_NAME} Boot Manager" -d "${TIK_INSTALL_DEVICE}" -l "${TIK_EFI_BOOT_PATH}" -p ${efipartnum}
         log "[set_boot_target] $(prun /usr/sbin/efibootmgr)"
         efi_already_set=1
     fi
@@ -257,7 +400,9 @@ load_modules() {
             tik_module="$f"
             log "[START] $f (phase=${phase} module_index=${TIK_CURRENT_MODULE_INDEX}/${TIK_TOTAL_MODULES})"
             . "$f"
-            log "[STOP] $f"
+            local module_result=$?
+            log "[STOP][${module_result}] $f"
+            [[ ${module_result} == 0 ]] || error "Module ${f} failed (exit ${module_result}); see ${tik_log}."
 
             if [ -n "${TIK_TOTAL_MODULES}" ] && [ "${TIK_TOTAL_MODULES}" -gt 0 ] && \
                [ "${TIK_CURRENT_MODULE_INDEX}" -eq "${TIK_TOTAL_MODULES}" ]; then

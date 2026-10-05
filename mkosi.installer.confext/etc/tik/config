@@ -1,0 +1,18 @@
+# Proto integration, separate from the reusable upstream TIK library.
+TIK_DEPLOY_COMMAND=/usr/lib/proto/tik-repart
+TIK_SELFDEPLOY_ONLY=1
+TIK_DEFER_ROOT_WITHOUT_MIGRATION=1
+TIK_LOG_FILE=/var/lib/tik/log/tik.log
+TIK_SOURCE_DEVICE_FILE=/run/proto-installer-source-device
+TIK_ROOT_PARTITION_LABEL=USER
+TIK_ETC_SUBVOLUME=@etc
+TIK_BIND_LIVE_USR=1
+TIK_INSTALL_CRYPT_MAPPER=root
+TIK_MEASURE_VOLUME_KEY=1
+TIK_EFI_BOOT_PATH='\EFI\BOOT\BOOTX64.EFI'
+TIK_LIVE_MARKER=/etc/proto-live
+TIK_PCRLOCK_UPDATE_COMMAND=/usr/lib/proto-pcrlock-update
+TIK_PCRLOCK_PCRS=0+7
+TIK_TPM2_PUBLIC_KEY_PCRS=11
+TIK_INTEGRATION_LIBRARY=/usr/lib/proto/tik-integration
+TIK_BUG_URL=https://github.com/TobiPeterG/sys-proto/issues

@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: MIT
 # SPDX-FileCopyrightText: Copyright 2026 Tobias Görgens
 
-[[ -e /etc/proto-live ]] || error "Installation is only supported from proto live media"
+if [[ -n ${TIK_LIVE_MARKER:-} ]]; then
+    [[ -e ${TIK_LIVE_MARKER} ]] || error "Live-media marker is missing: ${TIK_LIVE_MARKER}"
+fi
 # Define the prompt before migration; 20-mig calls it after its decision.
 # No migrated users means USER provisioning is deferred to first boot.
 tik_collect_install_passphrase() {
@@ -44,3 +46,9 @@ tik_collect_install_passphrase() {
 
     log "[encrypt] User passphrase collected without logging it"
 }
+
+# Native upstream-style repart deployment creates an encrypted root before
+# first boot. Deferred-root backends collect this only when migration needs it.
+if [[ ${TIK_DEFER_ROOT_WITHOUT_MIGRATION:-0} != 1 ]]; then
+    tik_collect_install_passphrase
+fi

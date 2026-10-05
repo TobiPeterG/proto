@@ -2,8 +2,11 @@
 # SPDX-License-Identifier: MIT
 # SPDX-FileCopyrightText: Copyright 2026 Tobias Görgens
 
-set -euo pipefail
+set -Eeuo pipefail
+trap 'result=$?; printf "TIK repart: failed (exit %s) at %s:%s, function=%s\n" "${result}" "${BASH_SOURCE[0]}" "${LINENO}" "${FUNCNAME[0]:-main}" >&2' ERR
 . /usr/lib/tik/lib/tik-live-source
+# Privileged policy is vendor-owned; never source user-selected shell code.
+TIK_SOURCE_DEVICE_FILE=/run/proto-installer-source-device
 
 tik_secure_boot_enabled() {
     local state
@@ -99,11 +102,10 @@ tik_repart_finish_boot() (
     mount -t vfat -o rw "${xboot}" "${work}/boot"
 
     # Canonical CopyFiles= definitions already copy the OBS-signed boot chain
-    # and native type-2 UKIs. No bootctl/kernel-install replacement is needed.
+    # and native type-2 UKIs.
     [[ -f ${work}/efi/EFI/BOOT/BOOTX64.EFI && -f ${work}/efi/EFI/BOOT/grub.EFI &&
        -f ${work}/efi/EFI/systemd/systemd-bootx64.efi ]] || return 1
     [[ -n $(find "${work}/boot/EFI/Linux" -maxdepth 1 -type f -name '*.efi' -print -quit) ]] || return 1
-    # Only the installer role disappears; other companions remain untouched.
     find "${work}/boot/EFI/Linux" -mindepth 2 -maxdepth 2 -type f \
         -path '*.efi.extra.d/10-proto-installer.addon.efi' -delete
     find "${work}/boot/EFI/Linux" -mindepth 1 -maxdepth 1 -type d \
@@ -115,6 +117,7 @@ tik_repart_finish_boot() (
 tik_repart_worker() (
     local source details fstype mounted_source work
     source="$(tik_live_usr_device)"
+    echo "TIK repart: resolving authenticated source ${source}" >&2
     work="$(mktemp -d /run/tik-repart-sources.XXXXXXXX)"
     trap 'rm -rf -- "${work}"' EXIT
     # Resolve before unmerging: this Python helper lives in the installer
@@ -128,6 +131,7 @@ tik_repart_worker() (
         return 1
     fi
     tik_repart_check_boot_sources "${source}"
+    echo 'TIK repart: boot source preflight passed; exposing base /usr' >&2
     # Expose the real /usr, not the installer sysext, for canonical CopyFiles=.
     # This runs only in our private mount namespace, leaving the live desktop
     # and its installer extension merged in the parent's namespace. All helper
@@ -151,8 +155,11 @@ tik_repart_worker() (
         echo "Unexpected live /usr mount: ${details}; expected erofs from ${source}." >&2
         return 1
     fi
+    echo "TIK repart: deploying to ${1}, migration=${2}" >&2
     tik_repart_deploy "$@" "${work}"
+    echo 'TIK repart: partition deployment complete; finishing boot files' >&2
     tik_repart_finish_boot "$1"
+    echo 'TIK repart: deployment finished' >&2
 )
 
 tik_repart_main() {

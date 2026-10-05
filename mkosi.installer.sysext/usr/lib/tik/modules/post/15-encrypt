@@ -4,12 +4,24 @@
 # Migration needs USER now; without migration the installed initrd performs
 # the same provisioning transaction on first boot.
 
-if [[ ${migrate:-0} != 1 ]]; then
-    log "[encrypt] USER was deferred to first boot"
+if [[ -z ${tik_keyfile:-} || ! -f ${tik_keyfile} ]]; then
+    log "[encrypt] No bootstrap key: root provisioning is deferred or the image does not require encryption setup"
     return 0
 fi
 
 prepare_pcrlock_policy() {
+    local pcr pcr_json
+    local -a pcrs pcr_options=()
+    [[ ${TIK_PCRLOCK_PCRS:-} =~ ^[0-9]+(\+[0-9]+)*$ ]] || {
+        log '[encrypt] TIK_PCRLOCK_PCRS is missing or invalid'
+        return 1
+    }
+    IFS=+ read -r -a pcrs <<<"${TIK_PCRLOCK_PCRS}"
+    for pcr in "${pcrs[@]}"; do
+        [[ ${pcr} =~ ^(0|[1-9][0-9]?)$ && ${pcr} -lt 24 ]] || return 1
+        pcr_options+=("--pcr=${pcr}")
+    done
+    pcr_json="[$(IFS=,; echo "${pcrs[*]}")]"
     prun-opt /usr/bin/systemd-machine-id-setup --root="${TIK_ROOT_MNT}"
     [[ ${retval} -eq 0 ]] || return 1
 
@@ -30,29 +42,34 @@ prepare_pcrlock_policy() {
     [[ ${retval} -eq 0 ]] || return 1
 
     # systemd 262 added --strict= to predict and make-policy. Until 262 is the
-    # minimum version, verify explicitly that PCR 0 and PCR 7 were not silently
+    # minimum version, verify explicitly that configured PCRs were not silently
     # dropped from the generated policy.
     # TODO(systemd>=262): Replace the jq checks with --strict=yes.
     prun-opt /usr/bin/chroot "${TIK_ROOT_MNT}" /usr/bin/bash -c \
         'set -o pipefail
-         /usr/lib/systemd/systemd-pcrlock --json=short --pcr=0 --pcr=7 predict |
-             /usr/bin/jq -e '\''any(.[][]; .pcr == 0) and any(.[][]; .pcr == 7)'\'' \
-                 >/dev/null'
+         wanted=$1; shift
+         /usr/lib/systemd/systemd-pcrlock --json=short "$@" predict |
+             /usr/bin/jq -e --argjson wanted "$wanted" \
+                 '\''($wanted - [.[][] | .pcr] | length) == 0'\'' >/dev/null' \
+        tik-pcr-policy "${pcr_json}" "${pcr_options[@]}"
     [[ ${retval} -eq 0 ]] || return 1
 
     prun-opt /usr/bin/chroot "${TIK_ROOT_MNT}" \
-        /usr/lib/systemd/systemd-pcrlock make-policy --pcr=0 --pcr=7
+        /usr/lib/systemd/systemd-pcrlock make-policy "${pcr_options[@]}"
     [[ ${retval} -eq 0 ]] || return 1
 
-    prun-opt /usr/bin/chroot "${TIK_ROOT_MNT}" /usr/bin/jq -e \
-        'any(.pcrValues[]; .pcr == 0) and any(.pcrValues[]; .pcr == 7)' \
+    prun-opt /usr/bin/chroot "${TIK_ROOT_MNT}" /usr/bin/jq -e --argjson wanted "${pcr_json}" \
+        '($wanted - [.pcrValues[].pcr] | length) == 0' \
         /var/lib/systemd/pcrlock.json
     [[ ${retval} -eq 0 ]] || return 1
 
     # Use the same PCR-15 component and credential-publication workaround as
     # first-boot provisioning rather than enrolling an incomplete 0/7 policy.
-    prun-opt /usr/bin/chroot "${TIK_ROOT_MNT}" /usr/lib/proto-pcrlock-update
-    [[ ${retval} -eq 0 ]]
+    if [[ -n ${TIK_PCRLOCK_UPDATE_COMMAND:-} ]]; then
+        prun-opt /usr/bin/chroot "${TIK_ROOT_MNT}" "${TIK_PCRLOCK_UPDATE_COMMAND}"
+        [[ ${retval} -eq 0 ]] || return 1
+    fi
+    return 0
 }
 
 remove_pcrlock_policy() {
@@ -69,7 +86,7 @@ configure_encryption() {
     tik_target_mount "" "required"
 
     [[ -b "${TIK_CRYPT_PART}" ]] ||
-        error "Could not find the encrypted USER partition on ${TIK_INSTALL_DEVICE}"
+        error "Could not find the encrypted root partition on ${TIK_INSTALL_DEVICE}"
 
     tik_progress_step "Adding disk-encryption passphrase" 20
     logging=false
@@ -107,7 +124,7 @@ configure_encryption() {
                     --tpm2-device=auto \
                     --tpm2-pcrs= \
                     --tpm2-public-key="${pcr_public_key}" \
-                    --tpm2-public-key-pcrs=11 \
+                    --tpm2-public-key-pcrs="${TIK_TPM2_PUBLIC_KEY_PCRS:-11}" \
                     --tpm2-signature="${pcr_signature}" \
                     --tpm2-pcrlock="${pcrlock_policy}" \
                     "${TIK_CRYPT_PART}"

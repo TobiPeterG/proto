@@ -26,8 +26,7 @@ setup_env() {
     else
         log "[setup_env] Non-GNOME session detected, skipping GNOME settings"
     fi
-    # Live /var is volatile. Persistent TIKSTATE is grown by systemd-repart
-    # with GrowFileSystem=yes during initrd provisioning instead.
+    # Filesystem sizing belongs to the image's provisioning, not this module.
 }
 
 setup_env

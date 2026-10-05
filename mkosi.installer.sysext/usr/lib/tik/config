@@ -2,15 +2,21 @@
 # Default: "/etc/tik"
 TIK_CUSTOM_DIR="/etc/tik"
 
-# TIK installs the authenticated A set with systemd-repart.
-TIK_ROOT_PARTITION_LABEL="USER"
-TIK_ETC_SUBVOLUME="@etc"
+# image selection; an empty directory selects self-deployment.
+TIK_IMG_DIR="/usr/lib/tik/img"
+#TIK_INSTALL_IMAGE=""
 
-# The installer ESP has this filesystem label. Exclude every disk carrying
-# it, and additionally protect the actual running medium via its backing
-# device even if someone has changed its label.
+# Deployment-specific settings belong in ${TIK_CUSTOM_DIR}/config.
+# A backend accepts --check-secure-boot, or TARGET MIGRATION KEYFILE.
+# It must independently protect the running medium before modifying TARGET.
+TIK_DEPLOY_COMMAND=""
+TIK_SELFDEPLOY_ONLY=0
+TIK_DEFER_ROOT_WITHOUT_MIGRATION=0
+TIK_LOG_FILE="${HOME}/tik.log"
 TIK_INSTALL_MEDIA_LABEL="TIKINSTALL"
-TIK_BIND_LIVE_USR=1
+TIK_EFI_BOOT_PATH='\EFI\systemd\shim.efi'
+TIK_SOURCE_DEVICE_FILE=""
+TIK_INTEGRATION_LIBRARY=""
 
 # To show USB devices in the install device selection dialog, uncomment this variable
 # USB devices are filtered out by default
@@ -26,4 +32,4 @@ TIK_BIND_LIVE_USR=1
 
 # URL for bug reports to go to
 # Default: https://aeondesktop.org/reportbug
-TIK_BUG_URL="https://github.com/TobiPeterG/sys-proto/issues"
+TIK_BUG_URL="https://aeondesktop.org/reportbug"

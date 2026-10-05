@@ -4,15 +4,29 @@ tik_live_usr_device() {
     local source
     # Recorded by the initrd before sysext overlays /usr. Do not guess a
     # partition from another attached disk or copy the sysext's loop device.
-    if [[ -f /run/proto-installer-source-device &&
-          ! -L /run/proto-installer-source-device &&
-          $(stat -c %u /run/proto-installer-source-device) == 0 ]]; then
-        source="$(</run/proto-installer-source-device)"
+    if [[ -n ${TIK_SOURCE_DEVICE_FILE:-} ]]; then
+        [[ -f ${TIK_SOURCE_DEVICE_FILE} && ! -L ${TIK_SOURCE_DEVICE_FILE} &&
+           $(stat -c %u "${TIK_SOURCE_DEVICE_FILE}") == 0 ]] || {
+            echo "Missing or unsafe live source record: ${TIK_SOURCE_DEVICE_FILE}" >&2
+            return 1
+        }
+        source="$(<"${TIK_SOURCE_DEVICE_FILE}")"
         if [[ -b ${source} ]]; then
             readlink -f -- "${source}"
             return
         fi
+        echo "Recorded live source is not a block device: ${source}" >&2
+        return 1
     fi
+    # Other OSes may have a directly discoverable block-backed / or /usr.
+    for mountpoint in / /usr; do
+        source="$(findmnt --first-only --direction backward -nro SOURCE --target "${mountpoint}" 2>/dev/null)"
+        source="${source%%\[*}"
+        if [[ -b ${source} ]]; then
+            readlink -f -- "${source}"
+            return
+        fi
+    done
     echo 'Cannot identify the verified live /usr device.' >&2
     return 1
 }

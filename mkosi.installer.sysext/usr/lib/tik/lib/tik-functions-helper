@@ -106,7 +106,7 @@ tik_crypt_open() {
     if [[ -n ${tik_keyfile:-} && -f ${tik_keyfile} ]]; then
         # The PCR-15 volume-key digest includes the mapper name. Match the
         # installed GPT-auto root mapping, not TIK's migration-source alias.
-        mapper_name=root
+        mapper_name="${TIK_INSTALL_CRYPT_MAPPER:-${mapper_name}}"
     fi
 
     log "[tik_crypt_open] encrypted partition detected: ${TIK_CRYPT_PART} (mapper=${mapper_name})"
@@ -135,8 +135,12 @@ tik_crypt_open() {
     if [ -n "${tik_keyfile}" ] && [ -f "${tik_keyfile}" ]; then
         # Only measure the new installation, not a migration source. PCR 15
         # must contain its volume key before constructing the target policy.
-        prun /usr/lib/systemd/systemd-cryptsetup attach "${mapper_name}" \
-            "${TIK_CRYPT_PART}" "${tik_keyfile}" tpm2-measure-pcr=yes
+        if [[ ${TIK_MEASURE_VOLUME_KEY:-0} == 1 ]]; then
+            prun /usr/lib/systemd/systemd-cryptsetup attach "${mapper_name}" \
+                "${TIK_CRYPT_PART}" "${tik_keyfile}" tpm2-measure-pcr=yes
+        else
+            prun /usr/sbin/cryptsetup luksOpen --key-file="${tik_keyfile}" "${TIK_CRYPT_PART}" "${mapper_name}"
+        fi
         TIK_ROOT_DEV="/dev/mapper/${mapper_name}"
         export TIK_ROOT_DEV
         TIK_OPENED_MAPPER="${mapper_name}"

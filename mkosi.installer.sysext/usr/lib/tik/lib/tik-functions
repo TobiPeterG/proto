@@ -47,6 +47,10 @@ d() {
                     cenity result --question --text="Do you really want to quit?" && exit 1
                 fi
             ;;
+            *)
+                echo "Dialog failed (exit ${retval}); see ${tik_log}." >&2
+                return 1
+            ;;
         esac
     done
 }
@@ -66,9 +70,11 @@ d_opt() {
 # variant of privileged run (prun) function that doesn't require the pkexec call to return 0
 prun-opt() {
     if [ "${debug}" == "1" ]; then
+        retval=0
         log "[pkexec-noexec] $@"
     else
         retval=0
+        log "[pkexec][START] $@"
         pkexec "$@"
         retval=$?
         log "[pkexec][${retval}] $@"
@@ -206,14 +212,6 @@ tik_mount() {
     tik_track_mountpoint "${target}" "${listvar}"
 }
 
-tik_partition_by_type() {
-    local disk="$1"
-    local type="${2,,}"
-
-    lsblk "${disk}" -nrpo PATH,PARTTYPE |
-        awk -v wanted="${type}" \
-            'tolower($2) == wanted { print $1; exit }'
-}
 
 tik_target_mount() {
     # $1 = mapper override
@@ -289,37 +287,8 @@ tik_target_mount() {
     # mount root
     tik_mount_root "${TIK_ROOT_DEV}" "${TIK_ROOT_MNT}"
 
-    # Existing Proto installations have deployment-specific /etc snapshots.
-    # Prefer the last selected version, then the highest version; freshly
-    # deployed migration targets still use the bootstrap @etc seed.
-    local etc_subvolume="${TIK_ETC_SUBVOLUME:-}" candidate current
-    if [[ ${etc_subvolume} == @etc ]]; then
-        if ! mountpoint -q "${TIK_ROOT_MNT}/.system"; then
-            tik_mount "${TIK_ROOT_DEV}" "${TIK_ROOT_MNT}/.system" \
-                "subvol=/,nodev,nosuid" btrfs
-        fi
-        current="$(readlink "${TIK_ROOT_MNT}/.system/@etc-current" 2>/dev/null || true)"
-        if [[ ${current} =~ ^@etc-[A-Za-z0-9][A-Za-z0-9._+-]*$ &&
-              -d ${TIK_ROOT_MNT}/.system/${current} ]]; then
-            etc_subvolume="${current}"
-        else
-            candidate="$(
-                for current in "${TIK_ROOT_MNT}/.system/"@etc-*; do
-                    [[ -d ${current} && ! -L ${current} ]] || continue
-                    printf '%s\n' "${current##*/}"
-                done | sort -V | tail -n1
-            )"
-            [[ -z ${candidate} ]] || etc_subvolume="${candidate}"
-        fi
-    fi
-    # Mount it before assembling fstab so the normal TIK helpers see /etc.
-    if [ -n "${TIK_ETC_SUBVOLUME:-}" ] &&
-        prun-opt /usr/sbin/btrfs subvolume list "${TIK_ROOT_MNT}" |
-            awk -v path="${etc_subvolume#/}" '$NF == path { found=1 } END { exit !found }'; then
-        tik_mount "${TIK_ROOT_DEV}" "${TIK_ROOT_MNT}/etc" \
-            "subvol=/${etc_subvolume#/}" btrfs
-    elif [ -n "${TIK_ETC_SUBVOLUME:-}" ]; then
-        log "[tik_target_mount] configured /etc subvolume ${TIK_ETC_SUBVOLUME} not found"
+    if [[ -n ${TIK_TARGET_ROOT_HOOK:-} ]]; then
+        "${TIK_TARGET_ROOT_HOOK}" || error "Target root hook failed: ${TIK_TARGET_ROOT_HOOK}"
     fi
 
     # Assemble fstab in a writable location
@@ -333,32 +302,13 @@ tik_target_mount() {
     # mount everything described by assembled fstab
     tik_mount_from_fstab "${TIK_ROOT_MNT}"
 
-    # A self-deployed target has the exact authenticated /usr currently used
-    # by the live system. Bind it into the target so chrooted systemd tools and
-    # their libraries are available before the installed system has booted.
-    if [[ "${TIK_BIND_LIVE_USR:-0}" == 1 ]] && ! mountpoint -q "${TIK_ROOT_MNT}/usr"; then
-        tik_mount /usr "${TIK_ROOT_MNT}/usr" "bind,ro" none
-    fi
-
-    # Mount the target's boot partitions explicitly. Proto intentionally has
-    # no persistent fstab entries for discoverable GPT partitions, while
-    # systemd-pcrlock needs the target XBOOTLDR for its credential.
-    TIK_XBOOTLDR_PART="$(tik_partition_by_type "${TIK_INSTALL_DEVICE}" \
-        bc13c2ff-59e6-4262-a352-b275fd6f7172)"
-    export TIK_XBOOTLDR_PART
-    if [[ -n "${TIK_XBOOTLDR_PART}" ]] && ! mountpoint -q "${TIK_ROOT_MNT}/boot"; then
-        tik_mount "${TIK_XBOOTLDR_PART}" "${TIK_ROOT_MNT}/boot" "rw" vfat
-        log "[tik_target_mount] mounted XBOOTLDR ${TIK_XBOOTLDR_PART}"
-    fi
-
-    TIK_ESP_PART="$(tik_partition_by_type "${TIK_INSTALL_DEVICE}" \
-        c12a7328-f81f-11d2-ba4b-00a0c93ec93b)"
-    export TIK_ESP_PART
-    if [[ -n "${TIK_ESP_PART}" ]] && ! mountpoint -q "${TIK_ROOT_MNT}/efi"; then
-        tik_mount "${TIK_ESP_PART}" "${TIK_ROOT_MNT}/efi" "rw" vfat
-        log "[tik_target_mount] mounted ESP ${TIK_ESP_PART}"
-    elif [[ -z "${TIK_ESP_PART}" ]]; then
-        log "[tik_target_mount] no ESP found (continuing)"
+    if [[ -n ${TIK_TARGET_MOUNTS_HOOK:-} ]]; then
+        "${TIK_TARGET_MOUNTS_HOOK}" || error "Target mounts hook failed: ${TIK_TARGET_MOUNTS_HOOK}"
+    else
+        # Upstream's generic ESP discovery when no layout hook is configured.
+        probe_partitions "${TIK_INSTALL_DEVICE}" vfat
+        TIK_ESP_PART="${probedpart}"
+        export TIK_ESP_PART
     fi
 
     # bind pseudo fs for chroot usage
