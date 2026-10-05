@@ -1,8 +1,9 @@
 [Unit]
-Description=Prepare the volatile proto installer root
+Description=Prepare the persistent Proto installer root
 DefaultDependencies=no
-ConditionKernelCommandLine=systemd.volatile=yes
-After=sysroot-usr.mount systemd-volatile-root.service proto-installer-state.service
+ConditionKernelCommandLine=proto.installer=yes
+Requires=sysroot.mount sysroot-usr.mount proto-installer-state.service
+After=sysroot.mount sysroot-usr.mount proto-installer-state.service
 Before=systemd-sysext-sysroot.service systemd-confext-sysroot.service initrd-root-fs.target
 
 [Service]

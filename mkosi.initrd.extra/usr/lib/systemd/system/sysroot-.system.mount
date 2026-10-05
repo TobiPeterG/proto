@@ -1,8 +1,7 @@
 [Unit]
 Description=Mount the Proto USER filesystem top level
 DefaultDependencies=no
-ConditionKernelCommandLine=!systemd.volatile=yes
-ConditionKernelCommandLine=!root=tmpfs
+ConditionKernelCommandLine=!proto.installer=yes
 Requires=sysroot.mount
 After=sysroot.mount
 Before=proto-etc-prepare.service sysroot-etc.mount initrd-switch-root.target

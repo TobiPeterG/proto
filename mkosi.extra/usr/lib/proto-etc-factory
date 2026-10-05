@@ -69,17 +69,12 @@ def entries(root: Path, include_never: bool = False):
     return result
 
 
-def load_metadata(etc: Path, old_factory: Path | None):
+def load_metadata(etc: Path):
     path = etc / METADATA
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if data.get("version") != VERSION or not isinstance(data.get("entries"), dict):
-            raise ValueError("unsupported metadata format")
-        return data["entries"]
-    except FileNotFoundError:
-        if old_factory is None:
-            return {}
-        return entries(old_factory)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("version") != VERSION or not isinstance(data.get("entries"), dict):
+        raise ValueError("unsupported metadata format")
+    return data["entries"]
 
 
 def write_metadata(root: Path, managed):
@@ -110,8 +105,8 @@ def copy(source: Path, target: Path):
     subprocess.run(["cp", "-a", "--", str(source), str(target)], check=True)
 
 
-def merge(etc: Path, factory: Path, old_factory: Path | None):
-    old = load_metadata(etc, old_factory)
+def merge(etc: Path, factory: Path):
+    old = load_metadata(etc)
     new = entries(factory)
 
     for relative, new_value in new.items():
@@ -208,7 +203,7 @@ def select_etc(state: Path, version: str, factory: Path, relabel: bool = False):
                         ["btrfs", "subvolume", "snapshot", str(previous), str(snapshot)],
                         check=True,
                     )
-                    merge(snapshot, factory, None)
+                    merge(snapshot, factory)
                     if relabel:
                         relabel_etc(snapshot)
                     os.rename(snapshot, destination)
@@ -247,7 +242,6 @@ def main():
     merge_parser = commands.add_parser("merge")
     merge_parser.add_argument("--etc", required=True, type=Path)
     merge_parser.add_argument("--factory", required=True, type=Path)
-    merge_parser.add_argument("--old-factory", type=Path)
     sync_parser = commands.add_parser("sync-late")
     sync_parser.add_argument("--baseline", required=True, type=Path)
     sync_parser.add_argument("--source", required=True, type=Path)
@@ -262,7 +256,7 @@ def main():
     if args.command == "seed":
         seed(args.factory)
     elif args.command == "merge":
-        merge(args.etc, args.factory, args.old_factory)
+        merge(args.etc, args.factory)
     elif args.command == "select":
         select_etc(args.state, args.version, args.factory, args.relabel)
     else:

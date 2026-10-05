@@ -7,12 +7,11 @@ factory=/sysroot/usr/share/factory/etc
     exit 1
 }
 
-install -d -m 0755 /sysroot/etc /sysroot/var/lib/confexts
+install -d -m 0755 /sysroot/etc /sysroot/var/lib/confexts /sysroot/boot /sysroot/efi
+mount -t tmpfs -o mode=0755 tmpfs /sysroot/etc
 install -d -m 0700 /sysroot/var/lib/tik
-if [[ -s /run/proto-installer-state-device ]]; then
-    state="$(</run/proto-installer-state-device)"
-    mount -t btrfs -o compress=zstd:1 "${state}" /sysroot/var/lib/tik
-fi
+state="$(</run/proto-installer-state-device)"
+mount -t btrfs -o subvol=@state,compress=zstd:1 "${state}" /sysroot/var/lib/tik
 # The state root contains private migration data. Permit traversal to the
 # installer-owned log directory only; do not expose other users' backups.
 chmod 0711 /sysroot/var/lib/tik

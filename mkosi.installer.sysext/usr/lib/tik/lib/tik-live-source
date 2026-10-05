@@ -13,10 +13,6 @@ tik_live_usr_device() {
             return
         fi
     fi
-    if [[ -b /dev/mapper/usr ]]; then
-        readlink -f -- /dev/mapper/usr
-        return
-    fi
     echo 'Cannot identify the verified live /usr device.' >&2
     return 1
 }

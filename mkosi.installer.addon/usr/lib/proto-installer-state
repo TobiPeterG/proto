@@ -3,33 +3,55 @@ set -euo pipefail
 
 definitions=/usr/lib/proto-installer-repart.d
 device_file=/run/proto-installer-state-device
-source=
-for mountpoint in /sysusr/usr /sysroot/usr; do
-    source="$(findmnt -nro SOURCE --target "${mountpoint}" 2>/dev/null || true)"
-    [[ -n ${source} ]] && break
-done
+source="$(findmnt --first-only --direction backward -nro SOURCE --mountpoint /sysusr/usr)"
 source="${source%%\[*}"
-[[ -n ${source} ]] || { echo 'proto installer: cannot find live /usr device' >&2; exit 0; }
+[[ -n ${source} ]] || { echo 'proto installer: cannot find live /usr device' >&2; exit 1; }
 source="$(readlink -f -- "${source}")"
-[[ -b ${source} ]] || { echo 'proto installer: live /usr is not block-backed' >&2; exit 0; }
-# Keep this independent of optional TIKSTATE creation. The live desktop's
+[[ -b ${source} ]] || { echo 'proto installer: live /usr is not block-backed' >&2; exit 1; }
+# Record this before TIKSTATE creation and extension merging. The live desktop's
 # /usr will subsequently be an overlay and cannot identify its source disk.
 printf '%s\n' "${source}" >/run/proto-installer-source-device
 chmod 0644 /run/proto-installer-source-device
 
 disk="$(lsblk -snrpo PATH,TYPE "${source}" | awk '$2 == "disk" { print $1; exit }')"
-[[ -b ${disk} ]] || { echo "proto installer: cannot resolve live disk for ${source}" >&2; exit 0; }
+[[ -b ${disk} ]] || { echo "proto installer: cannot resolve live disk for ${source}" >&2; exit 1; }
 
-# A freshly flashed image usually has unallocated space after its A-only
-# partitions. Failure is non-fatal: installation still works, but migration is
-# disabled by TIK's normal free-space check.
+# A writable, expanded USB is required: TIKSTATE now backs the live root as
+# well as migration/log storage.
 if ! systemd-repart --no-pager --pretty=no --dry-run=no \
         --definitions="${definitions}" "${disk}"; then
-    echo "proto installer: no persistent migration space available on ${disk}" >&2
-    exit 0
+    echo "proto installer: cannot create writable TIKSTATE on ${disk}; use a writable USB with at least 1 GiB free after the image" >&2
+    exit 1
 fi
 
 udevadm settle --timeout=60
 state="$(lsblk -nrpo PATH,LABEL "${disk}" | awk '$2 == "TIKSTATE" { print $1; exit }')"
-[[ -b ${state} ]] || { echo 'proto installer: TIKSTATE was not created' >&2; exit 0; }
+[[ -b ${state} ]] || { echo 'proto installer: TIKSTATE was not created' >&2; exit 1; }
 printf '%s\n' "${state}" >"${device_file}"
+
+work="$(mktemp -d /run/proto-installer-state.XXXXXXXX)"
+cleanup() {
+    local result=$?
+    trap - EXIT
+    if mountpoint -q "${work}"; then
+        umount "${work}" || result=1
+    fi
+    rmdir "${work}" 2>/dev/null || true
+    exit "${result}"
+}
+trap cleanup EXIT
+mount -t btrfs -o subvol=/,compress=zstd:1 "${state}" "${work}"
+for subvolume in @root @state; do
+    if [[ ! -e ${work}/${subvolume} ]]; then
+        btrfs subvolume create "${work}/${subvolume}"
+    fi
+    [[ ! -L ${work}/${subvolume} ]]
+    btrfs subvolume show "${work}/${subvolume}" >/dev/null
+done
+cp -a /sysusr/usr/lib/proto/installer-root-skeleton/. "${work}/@root/"
+install -d -m 0755 "${work}/@root"/{usr,etc,boot,efi,var,home,dev,proc,sys,run,root,media,mnt,opt,srv}
+install -d -m 1777 "${work}/@root/tmp"
+# Non-/dev path deliberately avoids waiting for a udev alias device unit.
+# sysroot.mount is ordered after this service and resolves this root-owned
+# symlink directly to the partition on the authenticated live source disk.
+ln -sfn -- "${state}" /run/proto-installer-root

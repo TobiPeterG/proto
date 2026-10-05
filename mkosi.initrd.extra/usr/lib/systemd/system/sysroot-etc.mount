@@ -1,7 +1,7 @@
 [Unit]
 Description=Mount the current deployment's /etc snapshot
 DefaultDependencies=no
-ConditionKernelCommandLine=!systemd.volatile=yes
+ConditionKernelCommandLine=!proto.installer=yes
 Requires=proto-etc-prepare.service
 After=proto-etc-prepare.service
 Before=initrd-parse-etc.service initrd-fs.target initrd-switch-root.target

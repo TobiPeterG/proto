@@ -1,7 +1,7 @@
 [Unit]
 Description=Prepare the Proto USER bootstrap key
 DefaultDependencies=no
-ConditionKernelCommandLine=!systemd.volatile=yes
+ConditionKernelCommandLine=!proto.installer=yes
 Before=systemd-repart.service
 
 [Service]

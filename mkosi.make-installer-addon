@@ -66,7 +66,7 @@ mkdir -p "$(dirname "${output}")"
 ukify build \
     --efi-arch="${efi_arch}" \
     --stub="${stub}" \
-    --cmdline='root=tmpfs rootfstype=tmpfs rw systemd.volatile=yes' \
+    --cmdline='proto.installer=yes root=/run/proto-installer-root rootfstype=btrfs rootflags=subvol=@root rw' \
     --initrd="${work}/initrd.cpio.zst" \
     --sbat="@${source}/mkosi.installer.addon.sbat" \
     --output="${output}"

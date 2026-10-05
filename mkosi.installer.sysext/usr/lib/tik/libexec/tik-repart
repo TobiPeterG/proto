@@ -39,6 +39,40 @@ tik_repart_deploy() {
     udevadm settle --timeout=60
 }
 
+tik_repart_check_boot_sources() {
+    local source=$1 disk path type partition details fstype mounted_source
+    disk="$(lsblk -snrpo PATH,TYPE "${source}" | awk '$2 == "disk" {print $1}')"
+    [[ -n ${disk} && ${disk} != *$'\n'* ]] || return 1
+    for path in /efi /boot; do
+        if [[ ${path} == /efi ]]; then
+            type=c12a7328-f81f-11d2-ba4b-00a0c93ec93b
+        else
+            type=bc13c2ff-59e6-4262-a352-b275fd6f7172
+        fi
+        partition="$(lsblk -nrpo PATH,PARTTYPE "${disk}" |
+            awk -v type="${type}" 'tolower($2) == type {print $1}')"
+        # Access triggers native GPT automounts before inspecting the actual
+        # mount. Never copy a plain directory or another disk's boot files.
+        if [[ -z ${partition} || ${partition} == *$'\n'* ]] ||
+           ! stat "${path}/EFI" >/dev/null 2>&1 ||
+           ! details="$(findmnt --first-only --direction backward -nro FSTYPE,SOURCE --mountpoint "${path}")"; then
+            echo "Missing live boot source at ${path}; installation aborted before erasing the destination." >&2
+            return 1
+        fi
+        read -r fstype mounted_source <<<"${details}"
+        if [[ ${fstype} != vfat || $(readlink -f -- "${mounted_source}") != "$(readlink -f -- "${partition}")" ]]; then
+            echo "Unexpected boot source at ${path}: ${details}; expected vfat from ${partition}." >&2
+            return 1
+        fi
+    done
+    if [[ ! -f /efi/EFI/BOOT/BOOTX64.EFI || ! -f /efi/EFI/BOOT/grub.EFI ||
+          ! -f /efi/EFI/systemd/systemd-bootx64.efi ]] ||
+       [[ -z $(find /boot/EFI/Linux -maxdepth 1 -type f -name '*.efi' -print -quit) ]]; then
+        echo 'Live bootloader/UKI files are missing; installation aborted before erasing the destination.' >&2
+        return 1
+    fi
+}
+
 tik_repart_finish_boot() (
     local disk=$1 work esp xboot
     esp="$(lsblk -nrpo PATH,PARTTYPE "${disk}" |
@@ -93,6 +127,7 @@ tik_repart_worker() (
         echo "Live /usr source is not an active verity mapping: ${source}" >&2
         return 1
     fi
+    tik_repart_check_boot_sources "${source}"
     # Expose the real /usr, not the installer sysext, for canonical CopyFiles=.
     # This runs only in our private mount namespace, leaving the live desktop
     # and its installer extension merged in the parent's namespace. All helper

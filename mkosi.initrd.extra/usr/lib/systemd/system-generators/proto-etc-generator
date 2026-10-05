@@ -4,10 +4,10 @@ set -euo pipefail
 
 [[ -e /etc/initrd-release ]] || exit 0
 case " $(</proc/cmdline) " in
-    *' systemd.volatile=yes '*|*' root=tmpfs '*) exit 0 ;;
+    *' proto.installer=yes '*) exit 0 ;;
 esac
 
-# No dependency on USER mounts is pulled into the volatile live environment.
+# No dependency on installed USER mounts is pulled into the live environment.
 # Installed boots must mount their versioned /etc before switching root.
 # sysroot-etc.mount pulls in proto-etc-prepare.service, which requires the
 # native sysroot-.system.mount.

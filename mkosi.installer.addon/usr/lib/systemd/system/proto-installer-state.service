@@ -1,9 +1,10 @@
 [Unit]
-Description=Create persistent proto installer migration space
+Description=Create the persistent Proto installer root and migration space
 DefaultDependencies=no
-ConditionKernelCommandLine=systemd.volatile=yes
+ConditionKernelCommandLine=proto.installer=yes
+Requires=initrd-usr-fs.target
 After=initrd-usr-fs.target
-Before=proto-installer-prepare-root.service initrd-root-fs.target
+Before=sysroot.mount proto-installer-prepare-root.service initrd-root-fs.target
 
 [Service]
 Type=oneshot

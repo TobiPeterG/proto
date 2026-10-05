@@ -1,7 +1,7 @@
 [Unit]
 Description=Create the proto live installer account
 DefaultDependencies=no
-ConditionKernelCommandLine=systemd.volatile=yes
+ConditionKernelCommandLine=proto.installer=yes
 Requires=systemd-sysext-sysroot.service
 After=proto-installer-prepare-root.service systemd-sysext-sysroot.service
 Before=systemd-confext-sysroot.service initrd-root-fs.target

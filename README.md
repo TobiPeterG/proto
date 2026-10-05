@@ -109,13 +109,29 @@ xzcat mkosi.output/proto-gnome_20260831_x86-64.raw.xz | \
 sync
 ```
 
+On first boot, the installer initrd uses `systemd-repart` to create an
+unencrypted TIKSTATE Btrfs partition in the USB's remaining space. A writable
+USB with at least 1 GiB free after the image is required; read-only or
+undersized media fail instead of falling back to a non-persistent installer.
+TIKSTATE's `@root` subvolume backs `/`, allowing GPT-auto to discover the
+installer's ESP and XBOOTLDR despite the installer sysext overlay on `/usr`.
+The separate `@state` subvolume is mounted at `/var/lib/tik` and preserves
+`log/tik.log` and migration backups across reboots. `/etc` is freshly seeded
+from the current image on tmpfs each boot, with ephemeral installer confext
+changes, rather than retaining stale live account/desktop configuration.
+TIKSTATE is never copied to the installed system and does not use its USER
+provisioning or factory-reset definitions.
+
 The graphical installer is `tik`. Its self-deploy path invokes
-`systemd-repart` on the selected target disk. `CopyBlocks=auto` clones the
-currently verified `/usr`, usr-verity and signature partitions and preserves
-their partition UUIDs, so the root hash embedded in the UKI remains valid. It
-creates a fresh empty B slot and a fresh LUKS2-encrypted Btrfs partition. The
-latter is initialized from `/usr/share/factory/etc`; live-user autologin and
-installer authorization are not copied to the installed system.
+`systemd-repart` on the selected target disk. Temporary source-only drop-ins
+explicitly select the active A `/usr`, usr-verity and signature partitions
+and preserve their partition UUIDs, so the root hash embedded in the UKI
+remains valid. Before destination erasure, TIK verifies the boot source mounts
+are on the authenticated live disk and contain the bootloader and UKIs.
+Without migration, B and encrypted USER are deferred to first installed boot;
+with migration, they are created during installation. USER is initialized
+from `/usr/share/factory/etc`; live-user autologin and installer authorization
+are not copied to the installed system.
 
 The user chooses a LUKS passphrase during installation. If a TPM 2.0 is
 present and the booted OBS-signed UKI contains its signed PCR policy, Tik also
