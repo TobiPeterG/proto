@@ -44,8 +44,13 @@ tik_repart_deploy() {
 
 tik_repart_check_boot_sources() {
     local source=$1 disk path type partition details fstype mounted_source
-    disk="$(lsblk -snrpo PATH,TYPE "${source}" | awk '$2 == "disk" {print $1}')"
-    [[ -n ${disk} && ${disk} != *$'\n'* ]] || return 1
+    # dm-verity lists the same disk through both data and hash partitions.
+    # Require one unique backing disk, not one line in the ancestry output.
+    if ! disk="$(lsblk -snrpo PATH,TYPE "${source}" | awk '$2 == "disk" {print $1}' | sort -u)" ||
+       [[ -z ${disk} || ${disk} == *$'\n'* ]]; then
+        echo "Cannot resolve one unique live backing disk for ${source}; installation aborted before erasing the destination." >&2
+        return 1
+    fi
     for path in /efi /boot; do
         if [[ ${path} == /efi ]]; then
             type=c12a7328-f81f-11d2-ba4b-00a0c93ec93b
