@@ -8,13 +8,17 @@ source="${source%%\[*}"
 [[ -n ${source} ]] || { echo 'proto installer: cannot find live /usr device' >&2; exit 1; }
 source="$(readlink -f -- "${source}")"
 [[ -b ${source} ]] || { echo 'proto installer: live /usr is not block-backed' >&2; exit 1; }
-# Record this before TIKSTATE creation and extension merging. The live desktop's
-# /usr will subsequently be an overlay and cannot identify its source disk.
+disk="$(/usr/lib/proto-installer-boot-disk)"
+source_disk="$(lsblk -snrpo PATH,TYPE "${source}" | awk '$2 == "disk" {print $1}' | sort -u)"
+if [[ -z ${source_disk} || ${source_disk} == *$'\n'* ||
+      $(readlink -f -- "${source_disk}") != "${disk}" ]]; then
+    echo "proto installer: /usr backing disk '${source_disk}' does not match boot-loader disk '${disk}'; refusing TIKSTATE creation" >&2
+    exit 1
+fi
+# Record only after checking the boot disk, before TIKSTATE creation and
+# extension merging. The desktop's /usr will subsequently be an overlay.
 printf '%s\n' "${source}" >/run/proto-installer-source-device
 chmod 0644 /run/proto-installer-source-device
-
-disk="$(lsblk -snrpo PATH,TYPE "${source}" | awk '$2 == "disk" { print $1; exit }')"
-[[ -b ${disk} ]] || { echo "proto installer: cannot resolve live disk for ${source}" >&2; exit 1; }
 
 # A writable, expanded USB is required: TIKSTATE now backs the live root as
 # well as migration/log storage.

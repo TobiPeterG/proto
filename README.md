@@ -116,6 +116,11 @@ USB with at least 1 GiB free after the image is required; read-only or
 undersized media fail instead of falling back to a non-persistent installer.
 TIKSTATE's `@root` subvolume backs `/`, allowing GPT-auto to discover the
 installer's ESP and XBOOTLDR despite the installer sysext overlay on `/usr`.
+The verity data/hash devices use boot-disk-scoped GPT designator links, not
+global PARTUUID links that collide with an installed copy of the same image.
+Before creating TIKSTATE, the installer independently resolves the disk from
+`LoaderDevicePartUUID` and rejects a different `/usr` backing disk or an
+ambiguous boot partition UUID.
 The separate `@state` subvolume is mounted at `/var/lib/tik` and preserves
 `log/tik.log` and migration backups across reboots. `/etc` is freshly seeded
 from the current image on tmpfs each boot, with ephemeral installer confext

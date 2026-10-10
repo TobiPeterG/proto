@@ -1,0 +1,32 @@
+#!/usr/bin/bash
+set -euo pipefail
+
+# Resolve the boot-loader partition by enumerating devices, never through a
+# global by-partuuid symlink: duplicates must fail closed, not select a disk.
+loader_variable=/sys/firmware/efi/efivars/LoaderDevicePartUUID-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
+[[ -r ${loader_variable} ]] || {
+    echo 'proto installer: boot-loader partition UUID is unavailable; refusing disk changes' >&2
+    exit 1
+}
+# efivarfs stores four attribute bytes followed by a UTF-16LE UUID string.
+loader_uuid="$(dd if="${loader_variable}" bs=1 skip=4 status=none |
+    tr -d '\000' | tr '[:upper:]' '[:lower:]')"
+[[ ${loader_uuid} =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || {
+    echo 'proto installer: invalid boot-loader partition UUID; refusing disk changes' >&2
+    exit 1
+}
+partition="$(lsblk -nrpo PATH,TYPE,PARTTYPE,PARTUUID |
+    awk -v uuid="${loader_uuid}" '$2 == "part" && tolower($4) == uuid &&
+        (tolower($3) == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" ||
+         tolower($3) == "bc13c2ff-59e6-4262-a352-b275fd6f7172") {print $1}' |
+    sort -u)"
+[[ -n ${partition} && ${partition} != *$'\n'* && -b ${partition} ]] || {
+    echo 'proto installer: cannot uniquely identify the boot-loader ESP/XBOOTLDR; refusing disk changes' >&2
+    exit 1
+}
+disk="$(lsblk -snrpo PATH,TYPE "${partition}" | awk '$2 == "disk" {print $1}' | sort -u)"
+[[ -n ${disk} && ${disk} != *$'\n'* && -b ${disk} ]] || {
+    echo 'proto installer: cannot uniquely identify the boot-loader disk; refusing disk changes' >&2
+    exit 1
+}
+readlink -f -- "${disk}"
