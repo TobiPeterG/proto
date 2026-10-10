@@ -110,7 +110,8 @@ sync
 ```
 
 On first boot, the installer initrd uses `systemd-repart` to create an
-unencrypted TIKSTATE Btrfs partition in the USB's remaining space. A writable
+unencrypted TIKSTATE Btrfs partition with the native root GPT type in the USB's
+remaining space. A writable
 USB with at least 1 GiB free after the image is required; read-only or
 undersized media fail instead of falling back to a non-persistent installer.
 TIKSTATE's `@root` subvolume backs `/`, allowing GPT-auto to discover the
