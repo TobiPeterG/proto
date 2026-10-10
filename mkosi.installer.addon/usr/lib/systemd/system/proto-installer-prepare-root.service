@@ -4,6 +4,8 @@ DefaultDependencies=no
 ConditionKernelCommandLine=proto.installer=yes
 Requires=sysroot.mount sysroot-usr.mount proto-installer-state.service
 After=sysroot.mount sysroot-usr.mount proto-installer-state.service
+Requires=sysroot-var-lib-extensions.mount sysroot-var-lib-confexts.mount
+After=sysroot-var-lib-extensions.mount sysroot-var-lib-confexts.mount
 Before=systemd-sysext-sysroot.service systemd-confext-sysroot.service initrd-root-fs.target
 
 [Service]

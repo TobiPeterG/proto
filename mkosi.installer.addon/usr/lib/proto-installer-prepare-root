@@ -1,13 +1,21 @@
 #!/usr/bin/bash
 set -euo pipefail
 
+# Never write installer payloads into persistent TIKSTATE if a mount is missing.
+for path in /sysroot/var/lib/extensions /sysroot/var/lib/confexts; do
+    if [[ $(findmnt --first-only --direction backward -nro FSTYPE --mountpoint "${path}") != tmpfs ]]; then
+        echo "proto installer: volatile extension storage is not mounted at ${path}" >&2
+        exit 1
+    fi
+done
+
 factory=/sysroot/usr/share/factory/etc
 [[ -d ${factory} ]] || {
     echo "proto installer: vendor /etc is missing from /usr" >&2
     exit 1
 }
 
-install -d -m 0755 /sysroot/etc /sysroot/var/lib/confexts /sysroot/boot /sysroot/efi
+install -d -m 0755 /sysroot/etc /sysroot/boot /sysroot/efi
 mount -t tmpfs -o mode=0755 tmpfs /sysroot/etc
 install -d -m 0700 /sysroot/var/lib/tik
 state="$(</run/proto-installer-state-device)"
@@ -18,6 +26,5 @@ chmod 0711 /sysroot/var/lib/tik
 install -d -m 0700 /sysroot/var/lib/tik/mig
 install -d -m 0700 -o 1000 -g 100 /sysroot/var/lib/tik/log
 cp -a "${factory}/." /sysroot/etc/
-install -d -m 0755 /sysroot/etc/extensions
-install -m 0644 /proto-installer/sysext/*.raw /sysroot/etc/extensions/
+install -m 0644 /proto-installer/sysext/*.raw /sysroot/var/lib/extensions/
 install -m 0644 /proto-installer/confext/*.raw /sysroot/var/lib/confexts/

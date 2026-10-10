@@ -1,0 +1,15 @@
+[Unit]
+Description=Volatile Proto installer configuration extension storage
+DefaultDependencies=no
+ConditionKernelCommandLine=proto.installer=yes
+Requires=sysroot.mount
+After=sysroot.mount
+Before=proto-installer-prepare-root.service systemd-confext-sysroot.service initrd-root-fs.target
+Conflicts=umount.target
+Before=umount.target
+
+[Mount]
+What=tmpfs
+Where=/sysroot/var/lib/confexts
+Type=tmpfs
+Options=mode=0755,nodev,nosuid

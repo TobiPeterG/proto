@@ -120,6 +120,8 @@ The separate `@state` subvolume is mounted at `/var/lib/tik` and preserves
 `log/tik.log` and migration backups across reboots. `/etc` is freshly seeded
 from the current image on tmpfs each boot, with ephemeral installer confext
 changes, rather than retaining stale live account/desktop configuration.
+Installer sysext and confext images are copied from the signed add-on each boot
+into tmpfs mounts at `/var/lib/extensions` and `/var/lib/confexts`
 TIKSTATE is never copied to the installed system and does not use its USER
 provisioning or factory-reset definitions.
 
