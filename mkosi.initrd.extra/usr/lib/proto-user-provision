@@ -1,10 +1,12 @@
 #!/usr/bin/bash
-set -euo pipefail
+set -Eeuo pipefail
+trap 'status=$?; printf "proto: USER provisioning command failed (exit %s) at %s:%s\n" "${status}" "${BASH_SOURCE[0]}" "${LINENO}" >&2' ERR
 
 key=/run/proto-user-provision.key
 marker=/run/proto-user-provision.required
-reset_marker=/run/proto-user-provision.reset-incomplete
+reset_marker=/run/proto-user-provision.factory-reset
 mapper=root
+mapper_owned=no
 target=
 
 cleanup_failed_enrollment() {
@@ -22,16 +24,24 @@ cleanup_failed_enrollment() {
         umount "${target}/etc" 2>/dev/null || true
         umount "${target}" 2>/dev/null || true
     fi
-    systemd-cryptsetup detach "${mapper}" 2>/dev/null ||
-        cryptsetup close "${mapper}" 2>/dev/null || true
+    if [[ ${mapper_owned} == yes ]]; then
+        /usr/lib/systemd/systemd-cryptsetup detach "${mapper}" 2>/dev/null ||
+            cryptsetup close "${mapper}" 2>/dev/null || true
+    fi
     echo "proto: USER provisioning failed; temporary mounts and mapper were cleaned up" >&2
     exit "${status}"
 }
 
 root_device() {
     local candidate
-    for candidate in /dev/gpt-auto-root /dev/disk/by-designator/root; do
-        [[ -b ${candidate} ]] && { readlink -f -- "${candidate}"; return 0; }
+    # Before unlocking, the native GPT links have the -luks suffix. Never
+    # return the decrypted mapper: key enrollment must operate on its header.
+    for candidate in /dev/gpt-auto-root-luks /dev/disk/by-designator/root-luks \
+                     /dev/gpt-auto-root /dev/disk/by-designator/root; do
+        if [[ -b ${candidate} ]] && cryptsetup isLuks "${candidate}"; then
+            readlink -f -- "${candidate}"
+            return 0
+        fi
     done
     return 1
 }
@@ -39,20 +49,35 @@ root_device() {
 case ${1:?prepare or enroll required} in
 prepare)
     umask 0077
+    echo 'proto: preparing USER provisioning' >&2
+    udevadm settle --timeout=60
     dd if=/dev/urandom of="${key}" bs=64 count=1 status=none
+    reset_status=0
+    reset_state="$(/usr/lib/systemd/systemd-factory-reset status)" || reset_status=$?
+    [[ ${reset_status} == 0 || ${reset_status} == 10 || ${reset_status} == 11 ]] || {
+        echo 'proto: cannot determine factory-reset state; refusing provisioning' >&2
+        exit 1
+    }
+    case ${reset_state} in
+        on)
+            : >"${reset_marker}"
+            echo 'proto: explicit factory reset; USER recreation deferred to next boot' >&2
+            exit 0
+            ;;
+        off|unspecified|unsupported|pending|complete) ;;
+        *) echo "proto: unexpected factory-reset state '${reset_state}'" >&2; exit 1 ;;
+    esac
     if ! root_device >/dev/null; then
+        echo 'proto: USER is absent; provisioning required after repart' >&2
         : >"${marker}"
     else
         device="$(root_device)"
-        # repart creates the ephemeral bootstrap credential in slot zero.
-        # Its presence on a later boot means provisioning was interrupted
-        # before the human credential was verified and the slot was removed.
-        # USER contains no user data at this point, so recreate it atomically
-        # with this boot's new in-memory key instead of leaving it locked.
+        echo "proto: existing encrypted USER at ${device}; preserving its keys and data" >&2
+        # A keyslot number does not identify its owner. A public token records
+        # our bootstrap transaction, but never authorizes automatic erasure.
         if cryptsetup luksDump --dump-json-metadata "${device}" 2>/dev/null |
-                jq -e '.keyslots["0"] != null' >/dev/null; then
-            : >"${reset_marker}"
-            : >"${marker}"
+                jq -e 'any(.tokens[]?; .type == "proto-user-bootstrap" and .protoProvisioning == 1)' >/dev/null; then
+            echo 'proto: incomplete USER provisioning detected; use the passphrase if already set, otherwise request an explicit factory reset; automatic erasure is disabled' >&2
         fi
     fi
     ;;
@@ -61,6 +86,23 @@ enroll)
     trap cleanup_failed_enrollment EXIT
     udevadm settle --timeout=60
     device="$(root_device)" || { echo 'proto: repart did not create USER' >&2; exit 1; }
+    [[ ! -e /dev/mapper/${mapper} ]] || {
+        echo 'proto: root mapper already exists; refusing concurrent bootstrap enrollment' >&2
+        exit 1
+    }
+    echo "proto: enrolling credentials for newly created USER at ${device}" >&2
+    # Only a freshly created volume with a single slot owned by this boot's
+    # random key may enter bootstrap enrollment. Existing volumes are never
+    # reformatted or enrolled because they happen to have a slot numbered 0.
+    metadata="$(cryptsetup luksDump --dump-json-metadata "${device}")"
+    bootstrap_slot="$(jq -er '.keyslots | keys | if length == 1 then .[0] else error("expected one bootstrap keyslot") end' <<<"${metadata}")"
+    [[ ${bootstrap_slot} =~ ^[0-9]+$ ]] || exit 1
+    jq -e '(.tokens | length) == 0' <<<"${metadata}" >/dev/null
+    cryptsetup open --test-passphrase --key-slot="${bootstrap_slot}" --key-file="${key}" "${device}"
+    jq -n --arg slot "${bootstrap_slot}" \
+        '{type:"proto-user-bootstrap", keyslots:[$slot], protoProvisioning:1}' |
+        cryptsetup token import --token-id=0 --json-file=- "${device}"
+    unset metadata
 
     while true; do
         first="$(systemd-ask-password --timeout=0 'Set the disk-encryption passphrase:')"
@@ -71,7 +113,8 @@ enroll)
         echo 'Passphrases do not match.' >&2
     done
 
-    systemd-cryptsetup attach "${mapper}" "${device}" "${key}" 'tpm2-measure-pcr=yes'
+    mapper_owned=yes
+    /usr/lib/systemd/systemd-cryptsetup attach "${mapper}" "${device}" "${key}" 'tpm2-measure-pcr=yes'
     printf %s "${first}" | cryptsetup luksAddKey --key-file="${key}" \
         --new-keyfile=- --force-password "${device}"
     printf %s "${first}" | cryptsetup open --test-passphrase --key-file=- "${device}"
@@ -139,11 +182,17 @@ enroll)
     umount "${target}/etc"
     umount "${target}"
 
-    # Slot zero is the one created by systemd-repart for the bootstrap key.
-    # The verified user passphrase and, when available, TPM token remain.
-    systemd-cryptenroll --unlock-key-file="${key}" --wipe-slot=0 "${device}"
+    # The human passphrase was independently verified before retiring only
+    # the keyslot that we proved belongs to this boot's bootstrap key.
+    echo 'proto: retiring the verified bootstrap keyslot' >&2
+    systemd-cryptenroll --unlock-key-file="${key}" --wipe-slot="${bootstrap_slot}" "${device}"
+    if cryptsetup luksDump --dump-json-metadata "${device}" |
+            jq -e '.tokens["0"].type == "proto-user-bootstrap"' >/dev/null; then
+        cryptsetup token remove --token-id=0 "${device}"
+    fi
     trap - EXIT
     rm -f -- "${key}" "${marker}" "${reset_marker}"
+    echo 'proto: USER provisioning completed successfully' >&2
     ;;
 *)
     echo "Unknown operation: $1" >&2

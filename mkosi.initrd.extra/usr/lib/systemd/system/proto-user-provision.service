@@ -2,12 +2,16 @@
 Description=Provision the encrypted Proto USER partition
 DefaultDependencies=no
 ConditionKernelCommandLine=!proto.installer=yes
+ConditionPathExists=/etc/initrd-release
 ConditionPathExists=/run/proto-user-provision.required
+ConditionPathExists=!/run/proto-user-provision.factory-reset
 Requires=systemd-repart.service
 After=systemd-repart.service systemd-udev-settle.service initrd-usr-fs.target
 Before=initrd-root-fs.target sysroot.mount initrd-switch-root.target
+Before=systemd-cryptsetup@root.service
 Conflicts=shutdown.target
 
 [Service]
 Type=oneshot
+RemainAfterExit=yes
 ExecStart=/usr/lib/proto-user-provision enroll

@@ -3,12 +3,19 @@ set -euo pipefail
 
 definitions=/usr/lib/proto-installer-repart.d
 device_file=/run/proto-installer-state-device
-source="$(findmnt --first-only --direction backward -nro SOURCE --mountpoint /sysusr/usr)"
+if ! source="$(findmnt --first-only --direction backward -nro SOURCE --types erofs --mountpoint /sysusr/usr)"; then
+    echo 'proto installer: authenticated EROFS /usr mount is unavailable at /sysusr/usr' >&2
+    exit 1
+fi
 source="${source%%\[*}"
 [[ -n ${source} ]] || { echo 'proto installer: cannot find live /usr device' >&2; exit 1; }
 source="$(readlink -f -- "${source}")"
-[[ -b ${source} ]] || { echo 'proto installer: live /usr is not block-backed' >&2; exit 1; }
-disk="$(/usr/lib/proto-installer-boot-disk)"
+[[ -b ${source} ]] || { echo "proto installer: live /usr source '${source}' is not block-backed" >&2; exit 1; }
+veritysetup status "${source}" >/dev/null || {
+    echo 'proto installer: live /usr is not an active verity mapping' >&2
+    exit 1
+}
+disk="$(/usr/lib/proto-boot-disk)"
 source_disk="$(lsblk -snrpo PATH,TYPE "${source}" | awk '$2 == "disk" {print $1}' | sort -u)"
 if [[ -z ${source_disk} || ${source_disk} == *$'\n'* ||
       $(readlink -f -- "${source_disk}") != "${disk}" ]]; then

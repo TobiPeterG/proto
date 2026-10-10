@@ -1,4 +1,5 @@
 [Unit]
+ConditionPathExists=/etc/initrd-release
 Description=Create the proto live installer account
 DefaultDependencies=no
 ConditionKernelCommandLine=proto.installer=yes
@@ -8,4 +9,5 @@ Before=systemd-confext-sysroot.service initrd-root-fs.target
 
 [Service]
 Type=oneshot
+RemainAfterExit=yes
 ExecStart=/usr/bin/systemd-sysusers --root=/sysroot

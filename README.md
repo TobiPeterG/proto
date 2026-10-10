@@ -121,6 +121,12 @@ global PARTUUID links that collide with an installed copy of the same image.
 Before creating TIKSTATE, the installer independently resolves the disk from
 `LoaderDevicePartUUID` and rejects a different `/usr` backing disk or an
 ambiguous boot partition UUID.
+Normal first boot creates USER without deferring factory-reset-marked partitions.
+Existing encrypted USER volumes are preserved, including those with keyslot 0.
+New provisioning records a public `proto-user-bootstrap` LUKS token and verifies
+the bootstrap key before enrolling a human passphrase. Interrupted provisioning
+never triggers automatic volume erasure; an explicit factory reset is required
+if no usable human credential was established.
 The separate `@state` subvolume is mounted at `/var/lib/tik` and preserves
 `log/tik.log` and migration backups across reboots. `/etc` is freshly seeded
 from the current image on tmpfs each boot, with ephemeral installer confext

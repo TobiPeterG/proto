@@ -2,10 +2,12 @@
 Description=Create the persistent Proto installer root and migration space
 DefaultDependencies=no
 ConditionKernelCommandLine=proto.installer=yes
+ConditionPathExists=/etc/initrd-release
 Requires=initrd-usr-fs.target
 After=initrd-usr-fs.target
 Before=sysroot.mount proto-installer-prepare-root.service initrd-root-fs.target
 
 [Service]
 Type=oneshot
+RemainAfterExit=yes
 ExecStart=/usr/lib/proto-installer-state
