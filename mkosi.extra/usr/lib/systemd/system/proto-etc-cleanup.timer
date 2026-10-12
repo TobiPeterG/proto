@@ -1,0 +1,10 @@
+[Unit]
+Description=Periodically clean obsolete Proto /etc snapshots
+ConditionKernelCommandLine=!proto.installer=yes
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=1d
+
+[Install]
+WantedBy=timers.target

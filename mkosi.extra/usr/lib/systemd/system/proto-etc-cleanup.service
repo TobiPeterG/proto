@@ -1,0 +1,9 @@
+[Unit]
+Description=Remove Proto /etc snapshots without an installed UKI
+ConditionKernelCommandLine=!proto.installer=yes
+RequiresMountsFor=/.system /boot /efi
+After=boot-complete.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/proto-etc-cleanup

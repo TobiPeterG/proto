@@ -57,7 +57,40 @@ rd.systemd.mount-extra=/dev/gpt-auto-root:/sysroot/etc:btrfs:subvol=/@etc
 and usr-verity partitions, validate them against the `usrhash` embedded in the
 signed UKI and mount EROFS read-only. The Btrfs top level is additionally
 available at `/.system`; `/etc` is mounted from the dedicated `@etc`
-subvolume. No deployment image is loop-mounted from writable storage.
+bootstrap subvolume on initial provisioning. The initrd then selects
+`@etc-IMAGE_VERSION` through `@etc-current`; see the deployment notes below.
+No deployment image is loop-mounted from writable storage.
+
+### Deployment configuration and enrollment
+
+On a new version's first boot, `proto-etc-factory` snapshots the highest existing
+`@etc-VERSION` (or the initial `@etc`), merges factory changes while preserving
+user-modified files, validates SELinux labels against the deployment's own
+binary policy, and publishes the new snapshot atomically. An existing version's
+snapshot is reused unchanged on rollback. `proto-etc-prepare.service` runs in
+`RootDirectory=/sysroot` with systemd-managed API mounts. `proto-etc-cleanup.timer`
+checks 15 minutes after boot and daily thereafter. Versioned snapshots are kept
+exactly while a matching UKI remains in the installed OS's `$BOOT/EFI/Linux`,
+including failed and boot-counted entries. There is no extra version buffer or
+retry reset. Missing UKI discovery aborts cleanup; mounted snapshots cannot be
+deleted. The initial unversioned `@etc` remains the factory bootstrap seed.
+
+First-boot USER provisioning now only enrolls and verifies the human passphrase
+using `systemd-cryptenroll`, then retires the verified temporary bootstrap key.
+Normal GPT/cryptsetup/mount units unlock and mount root; provisioning no longer
+creates a temporary chroot or generates a TPM policy in the initrd.
+
+`proto-tpm-enroll.service` performs enrollment in the booted installed OS,
+with Secure Boot, the real machine ID, and native PCR components available.
+It requests the human disk passphrase to authorize enrollment; a failed attempt
+does not remove passphrase access. TIK likewise defers TPM enrollment until the
+installed OS is booted. CLI and native Varlink policy generation select PCRs
+0/7/15 with non-strict prediction: unavailable PCRs may be omitted, including
+during fwupd's temporary firmware/Secure Boot component relaxation. The CLI
+enrollment path still checks PCR 15; signed PCR 11 enrollment is unchanged.
+Automatic firmware handling requires systemd >=262 and fwupd >=2.1.7 with its
+systemd-pcrlock plugin built and active. The native sockets are enabled, and
+boot services restore firmware/Secure Boot components after reboot.
 
 OBS signing is enabled through `mkosi-obs`. It signs the UKI, bootloader and
 Verity metadata in its second build stage. The public OBS OpenPGP key is stored
@@ -147,9 +180,9 @@ with migration, they are created during installation. USER is initialized
 from `/usr/share/factory/etc`; live-user autologin and installer authorization
 are not copied to the installed system.
 
-The user chooses a LUKS passphrase during installation. If a TPM 2.0 is
-present and the booted OBS-signed UKI contains its signed PCR policy, Tik also
-enrolls the disk against a `systemd-pcrlock` policy for PCR 0 (firmware code)
+The user chooses a LUKS passphrase during migration installation or first boot.
+If a TPM 2.0 is present and the booted OBS-signed UKI contains its signed PCR
+policy, the installed OS enrolls the disk against a `systemd-pcrlock` policy for PCR 0 (firmware code)
 and PCR 7 (Secure Boot policy), as well as the UKI signing key and PCR 11.
 PCRs 1 and 2 are deliberately excluded, so firmware settings and additional
 option-ROM hardware do not normally invalidate the policy. Each signed update
@@ -160,9 +193,10 @@ Native `systemd-pcrlock` services maintain the predicted firmware code,
 Secure Boot policy and authority, machine ID and file-system components. After
 the first installed boot, `proto-pcrlock-policy.service` adds the missing LUKS
 volume-key measurement between systemd's machine-ID and root-file-system
-components in PCR 15, then rebuilds the policy explicitly for PCRs 0, 7 and
-15. This prevents a copied partition identity from using the TPM token through
-a rogue root file system.
+components in PCR 15, then requests a policy for PCRs 0, 7 and 15. Native
+non-strict update calls may omit unavailable PCRs. The CLI enrollment path
+verifies PCR 15, but native Varlink calls do not enforce that extra check.
+The volume-key component enables root-identity prediction
 New systemd/fwupd versions can therefore relax and restore the managed
 firmware-code component around a supported firmware update without replacing
 the LUKS token. Changes outside that coordinated path can require the disk

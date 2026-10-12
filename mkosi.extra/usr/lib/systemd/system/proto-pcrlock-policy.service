@@ -1,8 +1,14 @@
 [Unit]
 Description=Maintain Proto TPM PCR policy
+# TODO(systemd#42748): Remove this startup coordinator once a native root
+# volume-key component replaces Proto's generated 825 component. Update-time
+# policy refresh is already handled by the native Varlink notification socket.
 Documentation=man:systemd-pcrlock(8)
 ConditionSecurity=measured-uki
+ConditionSecurity=secureboot
+ConditionKernelCommandLine=!proto.installer=yes
 ConditionPathExists=/var/lib/systemd/pcrlock.json
+After=proto-tpm-enroll.service
 After=local-fs.target
 After=systemd-pcrmachine.service systemd-pcrfs-root.service
 After=systemd-pcrlock-firmware-code.service

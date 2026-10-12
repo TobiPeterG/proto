@@ -1,0 +1,29 @@
+[Unit]
+Description=Enroll Proto disk encryption into the TPM
+ConditionKernelCommandLine=!proto.installer=yes
+ConditionSecurity=secureboot
+ConditionSecurity=measured-uki
+ConditionPathExists=/dev/tpmrm0
+ConditionPathExists=!/var/lib/proto/tpm-enrolled
+Wants=systemd-ask-password-console.path
+Wants=systemd-pcrmachine.service systemd-pcrfs-root.service
+After=systemd-pcrmachine.service systemd-pcrfs-root.service
+After=local-fs.target
+After=systemd-pcrlock-firmware-code.service systemd-pcrlock-secureboot-policy.service
+After=systemd-pcrlock-secureboot-authority.service systemd-pcrlock-machine-id.service
+After=systemd-pcrlock-file-system.service
+Requires=systemd-pcrlock-firmware-code.service systemd-pcrlock-secureboot-policy.service
+Requires=systemd-pcrlock-secureboot-authority.service systemd-pcrlock-machine-id.service
+Requires=systemd-pcrlock-file-system.service
+RequiresMountsFor=/boot /efi /var/lib/systemd
+Before=display-manager.service
+
+[Service]
+Type=oneshot
+RuntimeDirectory=proto-tpm-enroll
+RuntimeDirectoryMode=0700
+TimeoutStartSec=180
+ExecStart=/usr/lib/proto-tpm-enroll
+
+[Install]
+WantedBy=multi-user.target

@@ -152,13 +152,21 @@ def relabel_etc(etc: Path):
     contexts = etc / f"selinux/{policy_type}/contexts/files/file_contexts"
     if not contexts.is_file():
         raise RuntimeError(f"SELinux contexts missing: {contexts}")
+    policies = [p for p in (etc / f"selinux/{policy_type}/policy").glob("policy.*")
+                if p.is_file() and p.name.removeprefix("policy.").isdigit()]
+    if not policies:
+        raise RuntimeError("Deployed SELinux binary policy is missing")
+    policy = max(policies, key=lambda p: int(p.name.removeprefix("policy.")))
     with tempfile.TemporaryDirectory(prefix="proto-etc-label-", dir="/run") as root:
         mounted = Path(root) / "etc"
         mounted.mkdir()
         subprocess.run(["mount", "--bind", str(etc), str(mounted)], check=True)
         try:
             subprocess.run(
-                ["setfiles", "-F", "-r", root, str(contexts), str(mounted)], check=True,
+                # Validate against the deployment, not the smaller initrd
+                # policy.
+                ["setfiles", "-c", str(policy), "-F", "-r", root,
+                 str(contexts), str(mounted)], check=True,
             )
         finally:
             subprocess.run(["umount", str(mounted)], check=True)
@@ -234,6 +242,53 @@ def sync_late(baseline: Path, source: Path, target: Path):
             copy(source / relative, destination)
 
 
+def uki_versions(boot: Path, image_id: str):
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", image_id):
+        raise ValueError("Unsafe image identity")
+    directory = boot / "EFI/Linux"
+    # Missing/unmounted $BOOT must never mean 'delete every snapshot'.
+    if not directory.is_dir():
+        raise RuntimeError("Installed UKI directory is unavailable; refusing cleanup")
+    pattern = re.compile(re.escape(image_id) +
+                         r"_(.+)_[A-Za-z0-9-]+(?:\+\d+(?:-\d+)?)?\.efi")
+    versions = set()
+    for path in directory.iterdir():
+        match = pattern.fullmatch(path.name)
+        if path.is_file() and match:
+            versions.add(match.group(1))
+    if not versions:
+        raise RuntimeError("No installed UKIs for this OS; refusing cleanup")
+    return versions
+
+
+def cleanup_etc(state: Path, image_id: str, boot: Path):
+    """Retain exactly versions whose UKIs remain installed"""
+    with (state / ".proto-etc.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        keep = uki_versions(boot, image_id)
+        current = state / "@etc-current"
+        if not current.is_symlink() or current.readlink().name.removeprefix("@etc-") not in keep:
+            raise RuntimeError("Active /etc has no installed UKI; refusing cleanup")
+        mounted = subprocess.run(
+            ["findmnt", "-rn", "-t", "btrfs", "-o", "FSROOT"],
+            text=True, capture_output=True, check=True,
+        ).stdout.splitlines()
+        mounted_names = {Path(path).name for path in mounted}
+        for candidate in sorted(state.glob("@etc-*")):
+            if not re.fullmatch(r"@etc-[A-Za-z0-9][A-Za-z0-9._+-]*", candidate.name):
+                continue
+            if not is_subvolume(candidate):
+                continue
+            # Re-read UKIs before each deletion; sysupdate may have added one
+            # since initial discovery.
+            if candidate.name.removeprefix("@etc-") in uki_versions(boot, image_id):
+                continue
+            if candidate.name in mounted_names:
+                print(f"proto etc: still mounted, deferring cleanup: {candidate}", file=sys.stderr)
+                continue
+            subprocess.run(["btrfs", "subvolume", "delete", str(candidate)], check=True)
+
+
 def main():
     parser = argparse.ArgumentParser()
     commands = parser.add_subparsers(dest="command", required=True)
@@ -251,6 +306,10 @@ def main():
     select_parser.add_argument("--version", required=True)
     select_parser.add_argument("--factory", required=True, type=Path)
     select_parser.add_argument("--relabel", action="store_true")
+    cleanup_parser = commands.add_parser("cleanup")
+    cleanup_parser.add_argument("--state", required=True, type=Path)
+    cleanup_parser.add_argument("--image-id", required=True)
+    cleanup_parser.add_argument("--boot", required=True, type=Path)
     args = parser.parse_args()
 
     if args.command == "seed":
@@ -259,6 +318,8 @@ def main():
         merge(args.etc, args.factory)
     elif args.command == "select":
         select_etc(args.state, args.version, args.factory, args.relabel)
+    elif args.command == "cleanup":
+        cleanup_etc(args.state, args.image_id, args.boot)
     else:
         sync_late(args.baseline, args.source, args.target)
 

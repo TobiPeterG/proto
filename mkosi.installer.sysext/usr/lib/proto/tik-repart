@@ -5,6 +5,9 @@
 set -Eeuo pipefail
 trap 'result=$?; printf "TIK repart: failed (exit %s) at %s:%s, function=%s\n" "${result}" "${BASH_SOURCE[0]}" "${LINENO}" "${FUNCNAME[0]:-main}" >&2' ERR
 . /usr/lib/tik/lib/tik-live-source
+# TODO(native sysinstall): Re-evaluate the native deploy backend when it can
+# resolve CopyBlocks from this split-/usr + sysext live environment and apply
+# Proto's deferred USER/B layout from the shared definitions.
 # Privileged policy is vendor-owned; never source user-selected shell code.
 TIK_SOURCE_DEVICE_FILE=/run/proto-installer-source-device
 

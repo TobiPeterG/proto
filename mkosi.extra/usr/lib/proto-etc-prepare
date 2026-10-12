@@ -1,0 +1,8 @@
+#!/usr/bin/bash
+# SPDX-License-Identifier: MIT
+set -euo pipefail
+# The initrd service uses RootDirectory=/sysroot and MountAPIVFS=yes
+. /usr/lib/os-release
+exec /usr/lib/proto-etc-factory select --state=/.system \
+    --version="${IMAGE_VERSION:?deployment version missing}" \
+    --factory=/usr/share/factory/etc --relabel
