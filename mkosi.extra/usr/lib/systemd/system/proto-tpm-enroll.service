@@ -5,7 +5,8 @@ ConditionSecurity=uefi-secureboot
 ConditionSecurity=measured-uki
 ConditionPathExists=/dev/tpmrm0
 ConditionPathExists=!/var/lib/proto/tpm-enrolled
-Wants=systemd-ask-password-console.path
+Wants=systemd-ask-password-console.path systemd-ask-password-plymouth.path
+After=plymouth-start.service systemd-ask-password-console.path systemd-ask-password-plymouth.path
 Wants=systemd-pcrmachine.service systemd-pcrfs-root.service
 After=systemd-pcrmachine.service systemd-pcrfs-root.service
 After=local-fs.target
@@ -16,7 +17,7 @@ Requires=systemd-pcrlock-firmware-code.service systemd-pcrlock-secureboot-policy
 Requires=systemd-pcrlock-secureboot-authority.service systemd-pcrlock-machine-id.service
 Requires=systemd-pcrlock-file-system.service
 RequiresMountsFor=/boot /efi /var/lib/systemd
-Before=display-manager.service
+Before=display-manager.service plymouth-quit.service
 
 [Service]
 Type=oneshot

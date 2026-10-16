@@ -92,9 +92,10 @@ enroll)
     unset metadata
 
     while true; do
-        first="$(systemd-ask-password --timeout=0 'Set the disk-encryption passphrase:')"
+        # Use cryptsetup's native expiring kernel cache
+        first="$(systemd-ask-password --no-tty --keyname=cryptsetup --timeout=0 'Set the disk-encryption passphrase:')"
         [[ ${#first} -ge 8 ]] || { echo 'Passphrase must have at least eight characters.' >&2; continue; }
-        second="$(systemd-ask-password --timeout=0 'Repeat the disk-encryption passphrase:')"
+        second="$(systemd-ask-password --no-tty --timeout=0 'Repeat the disk-encryption passphrase:')"
         [[ ${first} == "${second}" ]] && break
         unset first second
         echo 'Passphrases do not match.' >&2
