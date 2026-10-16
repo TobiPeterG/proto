@@ -1,7 +1,7 @@
 [Unit]
 Description=Enroll Proto disk encryption into the TPM
 ConditionKernelCommandLine=!proto.installer=yes
-ConditionSecurity=secureboot
+ConditionSecurity=uefi-secureboot
 ConditionSecurity=measured-uki
 ConditionPathExists=/dev/tpmrm0
 ConditionPathExists=!/var/lib/proto/tpm-enrolled

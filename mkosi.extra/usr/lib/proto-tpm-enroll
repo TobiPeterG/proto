@@ -5,7 +5,7 @@ set -euo pipefail
 # TODO(systemd>=262): Evaluate the cryptenroll Varlink API / native firstboot
 # wizard as replacement for this prompt coordinator.
 [[ ! -e /var/lib/proto/tpm-enrolled ]] || exit 0
-systemd-analyze condition ConditionSecurity=secureboot ConditionSecurity=measured-uki
+systemd-analyze condition ConditionSecurity=uefi-secureboot ConditionSecurity=measured-uki
 device="$(cryptsetup status root | sed -n 's/^[[:space:]]*device:[[:space:]]*//p')"
 [[ -b ${device} ]] && cryptsetup isLuks "${device}"
 [[ -r /run/systemd/tpm2-pcr-public-key.pem && -r /run/systemd/tpm2-pcr-signature.json ]]

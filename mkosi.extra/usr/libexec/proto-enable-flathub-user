@@ -2,19 +2,15 @@
 # SPDX-License-Identifier: MIT
 # SPDX-FileCopyrightText: Copyright 2026 Tobias Görgens
 
-set -u
+set -euo pipefail
 
-autostart="${XDG_CONFIG_HOME:-${HOME}/.config}/autostart/proto-enable-flathub.desktop"
 remote=https://dl.flathub.org/repo/flathub.flatpakrepo
+autostart="${XDG_CONFIG_HOME:-${HOME}/.config}/autostart/proto-enable-flathub.desktop"
+# Setup/system accounts must not configure a remote in their temporary homes.
+[[ $(id -u) -ge 1000 && $(id -u) -lt 65534 && ${HOME} == /home/* ]] || exit 0
 
-# NetworkManager and the desktop session may become ready in either order.
-# Keep the autostart entry when offline so the next login retries naturally.
-for attempt in {1..12}; do
-    if flatpak remote-add --user --if-not-exists flathub "${remote}"; then
-        rm -f -- "${autostart}"
-        exit 0
-    fi
-    sleep 10
+until flatpak remote-add --user --if-not-exists flathub "${remote}" &&
+      flatpak update --user --appstream flathub; do
+    sleep 60
 done
-
-exit 1
+rm -f -- "${autostart}"

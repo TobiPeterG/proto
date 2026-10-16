@@ -5,7 +5,7 @@ Description=Maintain Proto TPM PCR policy
 # policy refresh is already handled by the native Varlink notification socket.
 Documentation=man:systemd-pcrlock(8)
 ConditionSecurity=measured-uki
-ConditionSecurity=secureboot
+ConditionSecurity=uefi-secureboot
 ConditionKernelCommandLine=!proto.installer=yes
 ConditionPathExists=/var/lib/systemd/pcrlock.json
 After=proto-tpm-enroll.service
