@@ -57,7 +57,40 @@ rd.systemd.mount-extra=/dev/gpt-auto-root:/sysroot/etc:btrfs:subvol=/@etc
 and usr-verity partitions, validate them against the `usrhash` embedded in the
 signed UKI and mount EROFS read-only. The Btrfs top level is additionally
 available at `/.system`; `/etc` is mounted from the dedicated `@etc`
-subvolume. No deployment image is loop-mounted from writable storage.
+bootstrap subvolume on initial provisioning. The initrd then selects
+`@etc-IMAGE_VERSION` through `@etc-current`; see the deployment notes below.
+No deployment image is loop-mounted from writable storage.
+
+### Deployment configuration and enrollment
+
+On a new version's first boot, `proto-etc-factory` snapshots the highest existing
+`@etc-VERSION` (or the initial `@etc`), merges factory changes while preserving
+user-modified files, validates SELinux labels against the deployment's own
+binary policy, and publishes the new snapshot atomically. An existing version's
+snapshot is reused unchanged on rollback. `proto-etc-prepare.service` runs in
+`RootDirectory=/sysroot` with systemd-managed API mounts. `proto-etc-cleanup.timer`
+checks 15 minutes after boot and daily thereafter. Versioned snapshots are kept
+exactly while a matching UKI remains in the installed OS's `$BOOT/EFI/Linux`,
+including failed and boot-counted entries. There is no extra version buffer or
+retry reset. Missing UKI discovery aborts cleanup; mounted snapshots cannot be
+deleted. The initial unversioned `@etc` remains the factory bootstrap seed.
+
+First-boot USER provisioning now only enrolls and verifies the human passphrase
+using `systemd-cryptenroll`, then retires the verified temporary bootstrap key.
+Normal GPT/cryptsetup/mount units unlock and mount root; provisioning no longer
+creates a temporary chroot or generates a TPM policy in the initrd.
+
+`proto-tpm-enroll.service` performs enrollment in the booted installed OS,
+with Secure Boot, the real machine ID, and native PCR components available.
+It requests the human disk passphrase to authorize enrollment; a failed attempt
+does not remove passphrase access. TIK likewise defers TPM enrollment until the
+installed OS is booted. CLI and native Varlink policy generation select PCRs
+0/7/15 with non-strict prediction: unavailable PCRs may be omitted, including
+during fwupd's temporary firmware/Secure Boot component relaxation. The CLI
+enrollment path still checks PCR 15; signed PCR 11 enrollment is unchanged.
+Automatic firmware handling requires systemd >=262 and fwupd >=2.1.7 with its
+systemd-pcrlock plugin built and active. The native sockets are enabled, and
+boot services restore firmware/Secure Boot components after reboot.
 
 OBS signing is enabled through `mkosi-obs`. It signs the UKI, bootloader and
 Verity metadata in its second build stage. The public OBS OpenPGP key is stored
@@ -109,17 +142,47 @@ xzcat mkosi.output/proto-gnome_20260831_x86-64.raw.xz | \
 sync
 ```
 
-The graphical installer is `tik`. Its self-deploy path invokes
-`systemd-repart` on the selected target disk. `CopyBlocks=auto` clones the
-currently verified `/usr`, usr-verity and signature partitions and preserves
-their partition UUIDs, so the root hash embedded in the UKI remains valid. It
-creates a fresh empty B slot and a fresh LUKS2-encrypted Btrfs partition. The
-latter is initialized from `/usr/share/factory/etc`; live-user autologin and
-installer authorization are not copied to the installed system.
+On first boot, the installer initrd uses `systemd-repart` to create an
+unencrypted TIKSTATE Btrfs partition with the native root GPT type in the USB's
+remaining space. A writable
+USB with at least 1 GiB free after the image is required; read-only or
+undersized media fail instead of falling back to a non-persistent installer.
+TIKSTATE's `@root` subvolume backs `/`, allowing GPT-auto to discover the
+installer's ESP and XBOOTLDR despite the installer sysext overlay on `/usr`.
+The verity data/hash devices use boot-disk-scoped GPT designator links, not
+global PARTUUID links that collide with an installed copy of the same image.
+Before creating TIKSTATE, the installer independently resolves the disk from
+`LoaderDevicePartUUID` and rejects a different `/usr` backing disk or an
+ambiguous boot partition UUID.
+Normal first boot creates USER without deferring factory-reset-marked partitions.
+Existing encrypted USER volumes are preserved, including those with keyslot 0.
+New provisioning records a public `proto-user-bootstrap` LUKS token and verifies
+the bootstrap key before enrolling a human passphrase. Interrupted provisioning
+never triggers automatic volume erasure; an explicit factory reset is required
+if no usable human credential was established.
+The separate `@state` subvolume is mounted at `/var/lib/tik` and preserves
+`log/tik.log` and migration backups across reboots. `/etc` is freshly seeded
+from the current image on tmpfs each boot, with ephemeral installer confext
+changes, rather than retaining stale live account/desktop configuration.
+Installer sysext and confext images are copied from the signed add-on each boot
+into tmpfs mounts at `/var/lib/extensions` and `/var/lib/confexts`
+TIKSTATE is never copied to the installed system and does not use its USER
+provisioning or factory-reset definitions.
 
-The user chooses a LUKS passphrase during installation. If a TPM 2.0 is
-present and the booted OBS-signed UKI contains its signed PCR policy, Tik also
-enrolls the disk against a `systemd-pcrlock` policy for PCR 0 (firmware code)
+The graphical installer is `tik`. Its self-deploy path invokes
+`systemd-repart` on the selected target disk. Temporary source-only drop-ins
+explicitly select the active A `/usr`, usr-verity and signature partitions
+and preserve their partition UUIDs, so the root hash embedded in the UKI
+remains valid. Before destination erasure, TIK verifies the boot source mounts
+are on the authenticated live disk and contain the bootloader and UKIs.
+Without migration, B and encrypted USER are deferred to first installed boot;
+with migration, they are created during installation. USER is initialized
+from `/usr/share/factory/etc`; live-user autologin and installer authorization
+are not copied to the installed system.
+
+The user chooses a LUKS passphrase during migration installation or first boot.
+If a TPM 2.0 is present and the booted OBS-signed UKI contains its signed PCR
+policy, the installed OS enrolls the disk against a `systemd-pcrlock` policy for PCR 0 (firmware code)
 and PCR 7 (Secure Boot policy), as well as the UKI signing key and PCR 11.
 PCRs 1 and 2 are deliberately excluded, so firmware settings and additional
 option-ROM hardware do not normally invalidate the policy. Each signed update
@@ -130,9 +193,10 @@ Native `systemd-pcrlock` services maintain the predicted firmware code,
 Secure Boot policy and authority, machine ID and file-system components. After
 the first installed boot, `proto-pcrlock-policy.service` adds the missing LUKS
 volume-key measurement between systemd's machine-ID and root-file-system
-components in PCR 15, then rebuilds the policy explicitly for PCRs 0, 7 and
-15. This prevents a copied partition identity from using the TPM token through
-a rogue root file system.
+components in PCR 15, then requests a policy for PCRs 0, 7 and 15. Native
+non-strict update calls may omit unavailable PCRs. The CLI enrollment path
+verifies PCR 15, but native Varlink calls do not enforce that extra check.
+The volume-key component enables root-identity prediction
 New systemd/fwupd versions can therefore relax and restore the managed
 firmware-code component around a supported firmware update without replacing
 the LUKS token. Changes outside that coordinated path can require the disk

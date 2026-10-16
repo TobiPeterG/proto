@@ -4,6 +4,9 @@ set -euo pipefail
 # The per-image OBS drop-in includes mkosi-obs before registering this script,
 # so the upstream helper has already staged hashes and written the follow-up
 # recipe when this runs.
+# TODO(mkosi-obs): Remove custom final-output recipe registration when upstream
+# supports our XBOOTLDR UKI/add-on installation and XZ publication directly,
+# including preservation of final-output hooks through additional signing rounds.
 source_dir=
 for candidate in /usr/src/packages/SOURCES/*; do
     if [[ -f ${candidate}/mkosi.final-output ]]; then

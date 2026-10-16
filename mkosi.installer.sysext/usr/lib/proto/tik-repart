@@ -1,0 +1,201 @@
+#!/usr/bin/bash
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: Copyright 2026 Tobias Görgens
+
+set -Eeuo pipefail
+trap 'result=$?; printf "TIK repart: failed (exit %s) at %s:%s, function=%s\n" "${result}" "${BASH_SOURCE[0]}" "${LINENO}" "${FUNCNAME[0]:-main}" >&2' ERR
+. /usr/lib/tik/lib/tik-live-source
+# TODO(native sysinstall): Re-evaluate the native deploy backend when it can
+# resolve CopyBlocks from this split-/usr + sysext live environment and apply
+# Proto's deferred USER/B layout from the shared definitions.
+# Privileged policy is vendor-owned; never source user-selected shell code.
+TIK_SOURCE_DEVICE_FILE=/run/proto-installer-source-device
+
+tik_secure_boot_enabled() {
+    local state
+    state="$(LC_ALL=C mokutil --sb-state 2>/dev/null)" || return 1
+    grep -Fxq 'SecureBoot enabled' <<<"${state}" &&
+        ! grep -qi 'validation is disabled' <<<"${state}"
+}
+
+tik_repart_assert_target() {
+    local disk=$1 sources
+    [[ -b ${disk} && $(lsblk -dnro TYPE "${disk}") == disk ]] || return 1
+    sources="$(tik_source_disks)" || return 1
+    [[ -n ${sources} ]] || return 1
+    if grep -Fxq -- "${disk}" <<<"${sources}"; then
+        echo "Refusing to overwrite the running system's disk: ${disk}" >&2
+        return 1
+    fi
+}
+
+tik_repart_deploy() {
+    local disk=$1 migration=$2 keyfile=$3 overrides=$4
+    local -a options
+    # Only migration needs B and encrypted USER before first boot. Both
+    # flags must be explicit so installation never formats USER without a key.
+    if [[ ${migration} == 1 ]]; then
+        options=(--defer-partitions-empty=no --defer-partitions-factory-reset=no --key-file="${keyfile}")
+    else
+        options=(--defer-partitions-empty=yes --defer-partitions-factory-reset=yes)
+    fi
+    systemd-repart --no-pager --pretty=no --empty=force --dry-run=no \
+        --definitions="${overrides}" --definitions=/usr/lib/repart.d \
+        --copy-source=/ "${options[@]}" "${disk}"
+    udevadm settle --timeout=60
+}
+
+tik_repart_check_boot_sources() {
+    local source=$1 disk path type partition details fstype mounted_source
+    # dm-verity lists the same disk through both data and hash partitions.
+    # Require one unique backing disk, not one line in the ancestry output.
+    if ! disk="$(lsblk -snrpo PATH,TYPE "${source}" | awk '$2 == "disk" {print $1}' | sort -u)" ||
+       [[ -z ${disk} || ${disk} == *$'\n'* ]]; then
+        echo "Cannot resolve one unique live backing disk for ${source}; installation aborted before erasing the destination." >&2
+        return 1
+    fi
+    for path in /efi /boot; do
+        if [[ ${path} == /efi ]]; then
+            type=c12a7328-f81f-11d2-ba4b-00a0c93ec93b
+        else
+            type=bc13c2ff-59e6-4262-a352-b275fd6f7172
+        fi
+        partition="$(lsblk -nrpo PATH,PARTTYPE "${disk}" |
+            awk -v type="${type}" 'tolower($2) == type {print $1}')"
+        # Access triggers native GPT automounts before inspecting the actual
+        # mount. Never copy a plain directory or another disk's boot files.
+        if [[ -z ${partition} || ${partition} == *$'\n'* ]] ||
+           ! stat "${path}/EFI" >/dev/null 2>&1 ||
+           ! details="$(findmnt --first-only --direction backward -nro FSTYPE,SOURCE --mountpoint "${path}")"; then
+            echo "Missing live boot source at ${path}; installation aborted before erasing the destination." >&2
+            return 1
+        fi
+        read -r fstype mounted_source <<<"${details}"
+        if [[ ${fstype} != vfat || $(readlink -f -- "${mounted_source}") != "$(readlink -f -- "${partition}")" ]]; then
+            echo "Unexpected boot source at ${path}: ${details}; expected vfat from ${partition}." >&2
+            return 1
+        fi
+    done
+    if [[ ! -f /efi/EFI/BOOT/BOOTX64.EFI || ! -f /efi/EFI/BOOT/grub.EFI ||
+          ! -f /efi/EFI/systemd/systemd-bootx64.efi ]] ||
+       [[ -z $(find /boot/EFI/Linux -maxdepth 1 -type f -name '*.efi' -print -quit) ]]; then
+        echo 'Live bootloader/UKI files are missing; installation aborted before erasing the destination.' >&2
+        return 1
+    fi
+}
+
+tik_repart_finish_boot() (
+    local disk=$1 work esp xboot
+    esp="$(lsblk -nrpo PATH,PARTTYPE "${disk}" |
+        awk 'tolower($2) == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" {print $1; exit}')"
+    xboot="$(lsblk -nrpo PATH,PARTTYPE "${disk}" |
+        awk 'tolower($2) == "bc13c2ff-59e6-4262-a352-b275fd6f7172" {print $1; exit}')"
+    [[ -b ${esp} && -b ${xboot} ]] || return 1
+    work="$(mktemp -d /run/tik-repart-boot.XXXXXXXX)"
+    cleanup() {
+        local result=$?
+        trap - EXIT
+        if mountpoint -q "${work}/boot"; then
+            umount "${work}/boot" || result=1
+        fi
+        if mountpoint -q "${work}/efi"; then
+            umount "${work}/efi" || result=1
+        fi
+        rmdir "${work}/boot" "${work}/efi" "${work}" 2>/dev/null || true
+        exit "${result}"
+    }
+    trap cleanup EXIT
+    mkdir "${work}/efi" "${work}/boot"
+    mount -t vfat -o rw "${esp}" "${work}/efi"
+    mount -t vfat -o rw "${xboot}" "${work}/boot"
+
+    # Canonical CopyFiles= definitions already copy the OBS-signed boot chain
+    # and native type-2 UKIs.
+    [[ -f ${work}/efi/EFI/BOOT/BOOTX64.EFI && -f ${work}/efi/EFI/BOOT/grub.EFI &&
+       -f ${work}/efi/EFI/systemd/systemd-bootx64.efi ]] || return 1
+    [[ -n $(find "${work}/boot/EFI/Linux" -maxdepth 1 -type f -name '*.efi' -print -quit) ]] || return 1
+    find "${work}/boot/EFI/Linux" -mindepth 2 -maxdepth 2 -type f \
+        -path '*.efi.extra.d/10-proto-installer.addon.efi' -delete
+    find "${work}/boot/EFI/Linux" -mindepth 1 -maxdepth 1 -type d \
+        -name '*.efi.extra.d' -empty -delete
+    sync -f "${work}/boot"
+    sync -f "${work}/efi"
+)
+
+tik_repart_worker() (
+    local source details fstype mounted_source work
+    source="$(tik_live_usr_device)"
+    echo "TIK repart: resolving authenticated source ${source}" >&2
+    work="$(mktemp -d /run/tik-repart-sources.XXXXXXXX)"
+    trap 'rm -rf -- "${work}"' EXIT
+    # Resolve before unmerging: this Python helper lives in the installer
+    # sysext. The resulting drop-ins override sources/UUIDs only, not layout.
+    /usr/bin/python3 "${BASH_SOURCE[0]%/*}/tik-repart-sources" \
+        "${source}" /usr/lib/repart.d "${work}"
+    # The source must remain the authenticated verity mapping, not its raw
+    # data partition. Fail before repart can erase the destination.
+    if ! veritysetup status "${source}" >/dev/null; then
+        echo "Live /usr source is not an active verity mapping: ${source}" >&2
+        return 1
+    fi
+    tik_repart_check_boot_sources "${source}"
+    echo 'TIK repart: boot source preflight passed; exposing base /usr' >&2
+    # Expose the real /usr, not the installer sysext, for canonical CopyFiles=.
+    # This runs only in our private mount namespace, leaving the live desktop
+    # and its installer extension merged in the parent's namespace. All helper
+    # functions have already been sourced before their sysext disappears here.
+    systemd-sysext --no-reload unmerge
+    # Explicitly cover any residual overlay/bind mount with the verified
+    # EROFS mount so factory /etc and USER's skeleton come from the base OS.
+    if ! mount -t erofs -o ro "${source}" /usr; then
+        echo "Failed to mount verified live /usr from ${source}." >&2
+        return 1
+    fi
+    # /usr can have several stacked mounts. Validate only the topmost one,
+    # not the concatenated output for every mount at that path.
+    if ! details="$(findmnt --first-only --direction backward -nro FSTYPE,SOURCE --target /usr)"; then
+        echo 'Cannot inspect the verified live /usr mount.' >&2
+        return 1
+    fi
+    read -r fstype mounted_source <<<"${details}"
+    mounted_source="${mounted_source%%\[*}"
+    if [[ ${fstype} != erofs || $(readlink -f -- "${mounted_source}") != "${source}" ]]; then
+        echo "Unexpected live /usr mount: ${details}; expected erofs from ${source}." >&2
+        return 1
+    fi
+    echo "TIK repart: deploying to ${1}, migration=${2}" >&2
+    tik_repart_deploy "$@" "${work}"
+    echo 'TIK repart: partition deployment complete; finishing boot files' >&2
+    tik_repart_finish_boot "$1"
+    echo 'TIK repart: deployment finished' >&2
+)
+
+tik_repart_main() {
+    if [[ ${1:-} == --check-secure-boot && $# == 1 ]]; then
+        tik_secure_boot_enabled
+        return
+    fi
+    [[ $# == 3 && ${EUID} == 0 && -e /etc/proto-live ]] || return 1
+    tik_secure_boot_enabled || {
+        echo 'Installation requires Secure Boot with shim validation enabled.' >&2
+        return 1
+    }
+    local disk migration=$2 keyfile=$3
+    disk="$(readlink -f -- "$1")"
+    [[ ${migration} == 0 || ${migration} == 1 ]] || return 1
+    tik_repart_assert_target "${disk}"
+    command -v systemd-repart >/dev/null
+    if [[ ${migration} == 1 ]]; then
+        [[ -f ${keyfile} && ! -L ${keyfile} &&
+           $(stat -c '%u:%a' "${keyfile}") == 0:400 ]] || return 1
+    else
+        [[ -z ${keyfile} ]] || return 1
+    fi
+    unshare --mount --propagation=private /usr/bin/bash -c \
+        'source "$1"; shift; tik_repart_worker "$@"' \
+        bash "${BASH_SOURCE[0]}" "${disk}" "${migration}" "${keyfile}"
+}
+
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+    tik_repart_main "$@"
+fi

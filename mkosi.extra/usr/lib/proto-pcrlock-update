@@ -3,13 +3,13 @@
 # SPDX-FileCopyrightText: Copyright 2026 Tobias Görgens
 
 set -euo pipefail
+umask 0077
 
 pcrlock=/usr/lib/systemd/systemd-pcrlock
 policy=/var/lib/systemd/pcrlock.json
 component=/var/lib/pcrlock.d/825-cryptsetup-root.pcrlock
 
-[[ -x "${pcrlock}" && -f "${policy}" ]] || exit 0
-
+[[ -x "${pcrlock}" ]] || exit 1
 # systemd-pcrlock does not synthesize a component for the
 # volume-key measurement written to PCR 15. Keep the component in /var so it is
 # tied to this encrypted installation rather than shipped in the image.
@@ -46,19 +46,18 @@ if [[ ! -f "${component}" ]]; then
     trap - EXIT
 fi
 
-# systemd 262 added --strict= to predict and make-policy. The explicit jq
-# checks retain compatibility with systemd 261 while ensuring none of the
-# requested PCRs are silently omitted.
-# TODO(systemd>=262): Use --strict=yes and remove both manual PCR-set checks
-# once 262 is the minimum supported version.
+# Firmware/Secure Boot components may be intentionally removed by fwupd.
+# Native non-strict prediction drops unavailable PCRs until boot services restore
+# their components. Do not make PCR 0/7 mandatory during this update transition.
+# Retain the root-volume measurement and verify PCR 15 before enrollment.
 prediction="$(
     "${pcrlock}" --json=short --pcr=0 --pcr=7 --pcr=15 predict
 )"
-jq -e \
-    'any(.[][]; .pcr == 0) and any(.[][]; .pcr == 7) and any(.[][]; .pcr == 15)' \
-    <<<"${prediction}" >/dev/null
+jq -e 'any(.[][]; .pcr == 15)' <<<"${prediction}" >/dev/null
 
-"${pcrlock}" make-policy --pcr=0 --pcr=7 --pcr=15
-
-jq -e 'any(.pcrValues[]; .pcr == 0) and any(.pcrValues[]; .pcr == 7) and any(.pcrValues[]; .pcr == 15)' \
-    "${policy}" >/dev/null
+# Use the same native credential publication as fwupd's MakePolicy calls.
+# TODO(systemd#42748): Revisit native public-only publication when available;
+# all CLI and Varlink policy writers must use the same mechanism.
+"${pcrlock}" --policy="${policy}" make-policy --pcr=0 --pcr=7 --pcr=15
+chmod 0600 "${policy}"
+jq -e 'any(.pcrValues[]; .pcr == 15)' "${policy}" >/dev/null

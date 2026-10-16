@@ -1,0 +1,30 @@
+#!/usr/bin/bash
+# SPDX-License-Identifier: MIT
+set -euo pipefail
+
+# TODO(systemd>=262): Evaluate the cryptenroll Varlink API / native firstboot
+# wizard as replacement for this prompt coordinator.
+[[ ! -e /var/lib/proto/tpm-enrolled ]] || exit 0
+systemd-analyze condition ConditionSecurity=uefi-secureboot ConditionSecurity=measured-uki
+device="$(cryptsetup status root | sed -n 's/^[[:space:]]*device:[[:space:]]*//p')"
+[[ -b ${device} ]] && cryptsetup isLuks "${device}"
+[[ -r /run/systemd/tpm2-pcr-public-key.pem && -r /run/systemd/tpm2-pcr-signature.json ]]
+/usr/lib/systemd/systemd-pcrlock is-supported
+
+# Authorize using a human credential; no bootstrap secret survives switch-root.
+key=/run/proto-tpm-enroll/passphrase
+trap 'rm -f -- "$key"' EXIT
+umask 0077
+systemd-ask-password --timeout=120 'Authorize TPM disk enrollment with your disk passphrase:' >"${key}"
+# ask-password writes a trailing newline; cryptsetup key files are binary.
+# Preserve passphrases containing internal newlines, remove only the final one.
+truncate -s -1 "${key}"
+cryptsetup open --test-passphrase --key-file="${key}" "${device}"
+/usr/lib/proto-pcrlock-update
+systemd-cryptenroll --unlock-key-file="${key}" --tpm2-device=auto --tpm2-pcrs= \
+    --tpm2-public-key=/run/systemd/tpm2-pcr-public-key.pem \
+    --tpm2-public-key-pcrs=11 --tpm2-signature=/run/systemd/tpm2-pcr-signature.json \
+    --tpm2-pcrlock=/var/lib/systemd/pcrlock.json "${device}"
+install -d -m 0700 /var/lib/proto
+touch /var/lib/proto/tpm-enrolled
+echo 'proto: TPM enrollment completed; the human passphrase remains available'

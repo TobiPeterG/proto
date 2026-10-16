@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: Copyright 2026 Tobias Görgens
+
+# Migration needs USER now; without migration the installed initrd performs
+# the same provisioning transaction on first boot.
+
+if [[ -z ${tik_keyfile:-} || ! -f ${tik_keyfile} ]]; then
+    log "[encrypt] No bootstrap key: root provisioning is deferred or the image does not require encryption setup"
+    return 0
+fi
+
+configure_encryption() {
+    tik_progress_step "Mounting encrypted target" 0
+    tik_target_mount "" "required"
+
+    [[ -b "${TIK_CRYPT_PART}" ]] ||
+        error "Could not find the encrypted root partition on ${TIK_INSTALL_DEVICE}"
+
+    tik_progress_step "Adding disk-encryption passphrase" 20
+    logging=false
+    if ! printf '%s' "${TIK_INSTALL_PASSPHRASE}" |
+        pkexec /usr/sbin/cryptsetup luksAddKey \
+            --key-file="${tik_keyfile}" \
+            --new-keyfile=- \
+            --force-password \
+            "${TIK_CRYPT_PART}"; then
+        logging=true
+        error "Could not add the disk-encryption passphrase"
+    fi
+    if ! printf '%s' "${TIK_INSTALL_PASSPHRASE}" |
+        pkexec /usr/sbin/cryptsetup open --test-passphrase --key-file=- \
+            "${TIK_CRYPT_PART}"; then
+        logging=true
+        error "Could not verify the disk-encryption passphrase"
+    fi
+    unset TIK_INSTALL_PASSPHRASE
+    logging=true
+
+    log '[encrypt] Passphrase verified'
+}
+
+label_target() {
+    local contexts policy selinux_type
+
+    tik_progress_step "Applying SELinux labels" 70
+    selinux_type="$(sed -n 's/^SELINUXTYPE=//p' /etc/selinux/config | tail -n1)"
+    selinux_type="${selinux_type:-targeted}"
+    contexts="/etc/selinux/${selinux_type}/contexts/files/file_contexts"
+    policy="$(find "/etc/selinux/${selinux_type}/policy" -maxdepth 1 \
+        -type f -name 'policy.*' -print | sort -V | tail -n1)"
+    [[ -f "${contexts}" && -f "${policy}" ]] ||
+        error "SELinux policy required to label the installation is missing"
+
+    prun /usr/sbin/setfiles -F -c "${policy}" -r "${TIK_ROOT_MNT}" \
+        "${contexts}" "${TIK_ROOT_MNT}"
+}
+
+configure_encryption
+label_target
+tik_progress_step "Encryption configured" 100

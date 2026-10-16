@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: Copyright 2024 SUSE LLC
+# SPDX-FileCopyrightText: Copyright 2024 Richard Brown
+# SPDX-FileCopyrightText: Copyright 2026 Tobias Görgens
+
+if [ "${migrate}" == 1 ]; then
+    homes_dir=${mig_dir}/homes
+    snapshot_prefix=.tik-mig-
+
+    tik_target_mount "" "required"
+
+    [ -n "${TIK_ROOT_MNT}" ] || error "MIGRATION FAILED: TIK_ROOT_MNT not set"
+    [ -n "${TIK_ROOT_DEV}" ] || error "MIGRATION FAILED: TIK_ROOT_DEV not set"
+    [ -d "${homes_dir}" ] || error "MIGRATION FAILED: no user home backups found"
+
+    tik_progress_step "Preparing migration restore" 0
+
+    tik_progress_step "Restoring user/account data" 25
+    prun /usr/bin/cat "${mig_dir}/passwd.out" |
+        prun /usr/bin/tee -a "${TIK_ROOT_MNT}/etc/passwd"
+    prun /usr/bin/cat "${mig_dir}/group.out" |
+        prun /usr/bin/tee -a "${TIK_ROOT_MNT}/etc/group"
+    prun /usr/bin/cat "${mig_dir}/shadow.out" |
+        prun /usr/bin/tee -a "${TIK_ROOT_MNT}/etc/shadow"
+    first_user="$(head -n 1 "${mig_dir}/passwd.out" | awk -F: '{print $1}')"
+    if [ -n "${first_user}" ]; then
+        prun /usr/bin/sed -i "/^wheel:/ s/$/${first_user}/" "${TIK_ROOT_MNT}/etc/group"
+    fi
+    if [ -f "${mig_dir}/subuid" ]; then
+        prun /usr/bin/cp -a "${mig_dir}/subuid" "${TIK_ROOT_MNT}/etc/subuid"
+    fi
+    if [ -f "${mig_dir}/subgid" ]; then
+        prun /usr/bin/cp -a "${mig_dir}/subgid" "${TIK_ROOT_MNT}/etc/subgid"
+    fi
+    prun-opt /usr/bin/cp -a "${mig_dir}/system-connections" "${TIK_ROOT_MNT}/etc/NetworkManager/"
+    prun-opt /usr/bin/cp -a "${mig_dir}/localtime" "${TIK_ROOT_MNT}/etc/localtime"
+    prun-opt /usr/bin/cp -a "${mig_dir}/users" "${TIK_ROOT_MNT}/var/lib/AccountsService/"
+    prun-opt /usr/bin/cp -a "${mig_dir}/icons" "${TIK_ROOT_MNT}/var/lib/AccountsService/"
+    prun-opt /usr/bin/cp -a "${mig_dir}/bluetooth" "${TIK_ROOT_MNT}/var/lib/"
+    prun-opt /usr/bin/cp -a "${mig_dir}/fprint" "${TIK_ROOT_MNT}/var/lib/"
+    prun-opt /usr/bin/cp -a "${mig_dir}/openvpn" "${TIK_ROOT_MNT}/etc/"
+
+    tik_progress_step "Restoring user homes" 55
+    prun /usr/bin/mkdir -p "${TIK_ROOT_MNT}/home"
+    for backup in "${homes_dir}/${snapshot_prefix}"*; do
+        [ -d "${backup}" ] || continue
+        username="$(basename "${backup}")"
+        username="${username#${snapshot_prefix}}"
+        [ -n "${username}" ] || error "MIGRATION FAILED: invalid home backup name"
+        [ ! -e "${TIK_ROOT_MNT}/home/${username}" ] ||
+            error "MIGRATION FAILED: /home/${username} already exists"
+
+        (prun /usr/sbin/btrfs send "${backup}" |
+            pv -f -F "# %b copied in %t %r" |
+            prun /usr/sbin/btrfs receive "${TIK_ROOT_MNT}/home") 2>&1 >/dev/null
+        prun /usr/bin/mv             "${TIK_ROOT_MNT}/home/${snapshot_prefix}${username}"             "${TIK_ROOT_MNT}/home/${username}"
+        prun /usr/sbin/btrfs property set -f -ts             "${TIK_ROOT_MNT}/home/${username}" ro false
+    done
+
+    # Existing users make the first-user wizard unnecessary.
+    prun-opt /usr/bin/rm -f         "${TIK_ROOT_MNT}/etc/systemd/system/multi-user.target.wants/plasma-setup.service"
+
+    tik_progress_step "Migration restore complete" 100
+    # Remove sensitive migration data from the live medium after restoration.
+    for backup in "${homes_dir}"/*; do
+        [ -e "${backup}" ] || continue
+        prun-opt /usr/sbin/btrfs property set -f -ts "${backup}" ro false
+        prun /usr/sbin/btrfs subvolume delete "${backup}"
+    done
+    prun /usr/bin/rm -rf "${mig_dir:?}/"*
+
+fi

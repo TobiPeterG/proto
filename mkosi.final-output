@@ -13,6 +13,8 @@ shopt -s nullglob
 # generated recipe forward in that case, but not additional scripts referenced
 # by the recipe. Defer all final processing and carry this script forward until
 # the terminal signing round has produced the final Secure Boot-signed UKI.
+# TODO(mkosi-obs): Remove recipe/script carry-forward when upstream preserves
+# custom final-output hooks across every PCR/PE signing round.
 if [[ -f ${output_dir}/hashes.cpio.rsasign ]]; then
     recipe=${output_dir}/mkosi.conf
     [[ -f ${recipe} ]] || {
@@ -35,7 +37,8 @@ RECIPE
     # next mkosi-obs invocation does not expand the 28 GiB disk just to look
     # for an ESP. The terminal invocation below installs the signed UKI into
     # XBOOTLDR and restores the public image name.
-    # TODO(mkosi-obs): Remove this hand-off once mkosi-obs supports XBOOTLDR.
+    # TODO(mkosi-obs): Remove this hand-off once upstream handles signed UKIs
+    # in XBOOTLDR without re-expanding the combined disk in UKI-only rounds.
     pending_entries=()
     while IFS= read -r entry; do
         entry=${entry#./}
@@ -72,7 +75,7 @@ fi
 # in XBOOTLDR, so replace the unsigned UKI there with the signed standalone
 # artifact before publishing the combined image.
 # TODO(mkosi-obs): Remove this disk rewrite when mkosi-obs detects XBOOTLDR and
-# installs the signed UKI there itself.
+# installs the signed UKI AND signed installer add-on there itself.
 ukis=("${output_dir}/${IMAGE_ID}_"*.efi)
 (( ${#ukis[@]} == 1 )) || {
     printf 'Expected one signed UKI for %s, found %d\n' \
@@ -126,6 +129,20 @@ mmd -D s -i "${disk_raw}@@${xbootldr_offset}" ::EFI ::EFI/Linux || true
 mcopy -n -o -i "${disk_raw}@@${xbootldr_offset}" \
     "${uki}" "::EFI/Linux/${uki_name}"
 
+installer_addon="${output_dir}/${IMAGE_ID}-installer.addon.efi"
+[[ -f ${installer_addon} ]] || {
+    echo "Signed installer add-on not found: ${installer_addon}" >&2
+    exit 1
+}
+addon_directory="${uki_name}.extra.d"
+printf "Installing signed installer add-on %s next to %s\n" \
+    "${installer_addon##*/}" "${uki_name}"
+mmd -D s -i "${disk_raw}@@${xbootldr_offset}" \
+    "::EFI/Linux/${addon_directory}" || true
+mcopy -n -o -i "${disk_raw}@@${xbootldr_offset}" \
+    "${installer_addon}" \
+    "::EFI/Linux/${addon_directory}/10-proto-installer.addon.efi"
+
 xz --threads=0 --stdout "${disk_raw}" > "${temporary}"
 [[ ${disk_input} == "${disk_xz}" ]] || rm -f -- "${disk_input}"
 mv -f -- "${temporary}" "${disk_xz}"
@@ -135,6 +152,9 @@ trap - EXIT
 # Convert any remaining Zstd-compressed split partition artifacts directly to
 # XZ without materializing additional raw copies. Existing XZ artifacts need
 # no conversion.
+# TODO(mkosi-obs): Remove intermediate Zstd -> XZ conversion only when upstream
+# can sign/update XZ-compressed combined and split artifacts natively without
+# extra full-size copies.
 zstds=("${output_dir}/${IMAGE_ID}_"*.raw.zst)
 for zstd_image in "${zstds[@]}"; do
     xz_image=${zstd_image%.zst}.xz

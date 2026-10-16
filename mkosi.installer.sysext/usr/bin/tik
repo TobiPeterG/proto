@@ -1,0 +1,117 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: Copyright 2023-2024 SUSE LLC
+# SPDX-FileCopyrightText: Copyright 2023-2024 Richard Brown
+# SPDX-FileCopyrightText: Copyright 2025 Tobias Görgens
+
+# Define variables
+# Style notes
+# lowercase variables = internal, not expected to be defined by users
+# uppercase variables = user facing, expected to be set by config
+
+tik_log=${TIK_LOG_FILE:-${HOME}/tik.log}
+tik_dir=/usr/lib/tik
+tik_module="tik"
+
+# Common helpers used by tik and modules
+. ${tik_dir}/lib/tik-functions
+# Core installer logic used only by tik and phase scripts
+. ${tik_dir}/lib/tik-core
+
+# Read configuration before choosing the log location.
+gui=false
+[[ ${XDG_SESSION_TYPE:-} != wayland && ${XDG_SESSION_TYPE:-} != x11 ]] || gui=true
+. "${tik_dir}/config" || error "Cannot load ${tik_dir}/config"
+if [[ -r ${TIK_CUSTOM_DIR}/config ]]; then
+    . "${TIK_CUSTOM_DIR}/config" || error "Cannot load ${TIK_CUSTOM_DIR}/config"
+fi
+tik_log=${TIK_LOG_FILE:-${tik_log}}
+
+# Start logging
+umask 077
+if ! touch "${tik_log}"; then
+    echo "Cannot write installer log to ${tik_log}." >&2
+    $gui && zenity --error --no-wrap --text="Cannot write installer log to ${tik_log}."
+    exit 1
+fi
+exec 2> >(exec tee -i -a "${tik_log}" >&2)
+logging=true
+log "[START] $0"
+log "[environment] uid=${UID} session=${XDG_SESSION_TYPE:-unspecified} log=${tik_log}"
+debug=${debug:-0}
+tik_install_complete=0
+
+# Check for debug mode
+if [[ ${1:-} == "--debug" ]]; then
+    debug=1
+fi
+
+# Check if graphical display is available
+XDG_SESSION_TYPE="${XDG_SESSION_TYPE:=unspecified}"
+if [ "${XDG_SESSION_TYPE}" = "wayland" ] || [ "${XDG_SESSION_TYPE}" = "x11" ] ; then
+    gui=true
+else
+    gui=false
+fi
+
+cleanup() {
+    local cleanup_result=$?
+    trap - EXIT ERR INT TERM
+    [[ ${cleanup_result} != 0 || ${tik_install_complete} == 1 ]] || cleanup_result=1
+    log "[cleanup][START] status=${cleanup_result} complete=${tik_install_complete} module=${tik_module}"
+    unset TIK_INSTALL_PASSPHRASE
+    tik_cleanup_mounts
+    if [[ -n ${tik_keyfile:-} ]]; then
+        prun-opt /usr/bin/rm -f -- "${tik_keyfile}"
+        unset tik_keyfile
+    fi
+    retval=${cleanup_result}
+    log "[STOP][${retval}] $0"
+    if [[ ${debug} == 1 && ${retval} == 0 ]]; then
+        d --timeout 5 --info --no-wrap --text="<b>Test Succeeded:</b>\n\nHave a nice day!"
+    elif [ "${retval}" == "0" ]; then
+        d --timeout 5 --info --no-wrap --title="Installation Complete!" --text="${TIK_OS_NAME} has been installed.\n\n<b>System is rebooting</b>"
+        prun systemctl reboot --force
+    else
+        d --error --no-wrap --title="Installation Failed" --text="Please file a bug report at <tt>${TIK_BUG_URL}</tt>\n\nPlease include <tt>${tik_log}</tt>. The live system will remain running so that the log can be copied."
+    fi
+    exit "${cleanup_result}"
+}
+trap cleanup EXIT
+# Log locations, not command arguments or shell traces: modules handle secrets.
+set -E
+trap 'tik_error_status=$?; log "[command-error] status=${tik_error_status} source=${BASH_SOURCE[0]} line=${LINENO} function=${FUNCNAME[0]:-main}"' ERR
+trap 'log "[signal] interrupted"; exit 130' INT
+trap 'log "[signal] terminated"; exit 143' TERM
+
+log '[stage] environment validation'
+if [[ -n ${TIK_INTEGRATION_LIBRARY:-} ]]; then
+    log "[integration] loading ${TIK_INTEGRATION_LIBRARY}"
+    . "${TIK_INTEGRATION_LIBRARY}" || error "Cannot load integration library: ${TIK_INTEGRATION_LIBRARY}"
+fi
+tik_assert_secure_boot
+[[ -d ${TIK_IMG_DIR} ]] || error "Image directory does not exist: ${TIK_IMG_DIR}"
+tik_detect_identity
+log "[identity] ${TIK_OS_NAME}"
+
+# Run pre modules
+tik_init_phase_modules "pre"
+load_modules "pre"
+load_modules "pre" "custom"
+
+# deploy a supplied image, or self-deploy when none exists.
+get_disk
+get_img
+log "[stage] deploying target=${TIK_INSTALL_DEVICE}"
+dump_image "${TIK_INSTALL_IMAGE}" "${TIK_INSTALL_DEVICE}"
+log '[stage] refreshing partition table'
+reread_partitiontable
+
+# Run post modules
+tik_init_phase_modules "post"
+load_modules "post"
+load_modules "post" "custom"
+
+wipe_keyfile
+set_boot_target
+tik_install_complete=1

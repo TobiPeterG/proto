@@ -4,3 +4,4 @@
 /mkosi.cache/
 /mkosi.pkgcache/
 /zypper/
+__pycache__

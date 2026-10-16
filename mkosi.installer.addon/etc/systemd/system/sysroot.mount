@@ -1,0 +1,13 @@
+[Unit]
+Description=Mount the persistent Proto installer root
+DefaultDependencies=no
+ConditionKernelCommandLine=proto.installer=yes
+Requires=proto-installer-state.service
+After=proto-installer-state.service
+Before=initrd-root-fs.target
+
+[Mount]
+What=/run/proto-installer-root
+Where=/sysroot
+Type=btrfs
+Options=subvol=@root,compress=zstd:1,rw
