@@ -21,10 +21,18 @@ cleanup_failed_enrollment() {
 
 root_device() {
     local candidate
+    local -a candidates=(/dev/gpt-auto-root-luks /dev/disk/by-designator/root-luks
+                        /dev/gpt-auto-root /dev/disk/by-designator/root)
+    # Ordinary root links are withheld until native reset completion. Only the
+    # enrollment phase, ordered after successful repart, may bypass that gate.
+    # Its bootstrap-key check below proves this is our freshly created volume.
+    if [[ ${1:-} == enroll && -e ${reset_marker} ]]; then
+        candidates=(/dev/gpt-auto-root-luks-ignore-factory-reset
+                    /dev/disk/by-designator/root-luks-ignore-factory-reset)
+    fi
     # Before unlocking, the native GPT links have the -luks suffix. Never
     # return the decrypted mapper: key enrollment must operate on its header.
-    for candidate in /dev/gpt-auto-root-luks /dev/disk/by-designator/root-luks \
-                     /dev/gpt-auto-root /dev/disk/by-designator/root; do
+    for candidate in "${candidates[@]}"; do
         if [[ -b ${candidate} ]] && cryptsetup isLuks "${candidate}"; then
             readlink -f -- "${candidate}"
             return 0
@@ -48,7 +56,8 @@ prepare)
     case ${reset_state} in
         on)
             : >"${reset_marker}"
-            echo 'proto: explicit factory reset; USER recreation deferred to next boot' >&2
+            : >"${marker}"
+            echo 'proto: explicit factory reset; recreate and provision USER in this boot' >&2
             exit 0
             ;;
         off|unspecified|unsupported|pending|complete) ;;
@@ -72,7 +81,7 @@ enroll)
     [[ -e ${marker} ]] || exit 0
     trap cleanup_failed_enrollment EXIT
     udevadm settle --timeout=60
-    device="$(root_device)" || { echo 'proto: repart did not create USER' >&2; exit 1; }
+    device="$(root_device enroll)" || { echo 'proto: repart did not create USER' >&2; exit 1; }
     [[ ! -e /dev/mapper/root ]] || {
         echo 'proto: root mapper already exists; refusing concurrent bootstrap enrollment' >&2
         exit 1
@@ -120,6 +129,9 @@ enroll)
         cryptsetup token remove --token-id=0 "${device}"
     fi
     trap - EXIT
+    # The native completion service checks this proof as well as unit success:
+    # a skipped provisioning unit must never authorize reset completion.
+    : >/run/proto-user-provision.complete
     rm -f -- "${key}" "${marker}" "${reset_marker}"
     echo 'proto: USER provisioning completed successfully' >&2
     ;;

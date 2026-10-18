@@ -12,12 +12,9 @@ else
     exit 1
 fi
 
+# Native reset detection authorizes erasure. Recreate USER in this same boot
+# with the bootstrap key, exactly as on normal first boot.
 reset_options=(--defer-partitions-factory-reset=no)
-if [[ -e /run/proto-user-provision.factory-reset ]]; then
-    # Only an explicitly requested factory-reset boot defers USER creation.
-    # Never infer permission to erase an existing volume from its keyslots.
-    reset_options=(--defer-partitions-factory-reset=yes)
-fi
 disk="$(/usr/lib/proto-boot-disk)"
 echo "proto: provisioning partitions on boot-loader disk ${disk}" >&2
 

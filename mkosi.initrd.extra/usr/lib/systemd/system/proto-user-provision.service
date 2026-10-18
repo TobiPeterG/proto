@@ -4,10 +4,9 @@ DefaultDependencies=no
 ConditionKernelCommandLine=!proto.installer=yes
 ConditionPathExists=/etc/initrd-release
 ConditionPathExists=/run/proto-user-provision.required
-ConditionPathExists=!/run/proto-user-provision.factory-reset
 Requires=systemd-repart.service
 After=systemd-repart.service systemd-udev-settle.service initrd-usr-fs.target
-Before=initrd-root-fs.target sysroot.mount initrd-switch-root.target
+Before=initrd-root-fs.target sysroot.mount initrd-switch-root.target systemd-factory-reset-complete.service
 Before=systemd-cryptsetup@root.service
 Conflicts=shutdown.target
 

@@ -264,10 +264,17 @@ same merge in the reverse direction.
 ## Factory reset
 
 The **Factory Reset** launcher requests systemd's firmware-assisted factory
-reset and reboots. In the initrd, `proto-factory-reset` reads the `usrhash`
-from the signed UKI, locates the corresponding `/usr` and usr-verity
-partitions by their hash-derived UUIDs, opens them through dm-verity, and only
-then recreates `@root` and `@etc` from the authenticated factory tree.
+reset and reboots once. Each signed UKI appends the installed image's
+`os-release` identity to the shared initrd, allowing systemd to recognize the
+request before root discovery. After mounting authenticated `/usr`, native
+`systemd-repart` deletes and immediately recreates the `FactoryReset=yes` USER
+partition using its normal factory definitions and a volatile bootstrap key.
+The provisioning service asks for a new passphrase, verifies it, and retires
+the bootstrap slot, just as on first boot. Only then may native factory-reset
+completion consume the request and retrigger normal root discovery. During
+provisioning, reset-specific root links are allowed only after successful
+repart and the new volume must pass the bootstrap-key check. Provisioning or
+repart failures block completion and switching to the new root.
 
 The operation deletes users, homes, Flatpaks, containers, logs and other
 mutable data. It does not modify `$BOOT` or either A/B system slot.
