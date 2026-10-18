@@ -18,6 +18,10 @@ done
     exit 1
 }
 
+# mkosi appends io.mkosi.initrd artifacts after the shared default initrd.
+# Use the same os-release as the system and UKI, including its desktop ID.
+"${source_dir}/mkosi.make-initrd-identity"
+
 # Generate the desktop-specific live role as a separate unsigned PE artifact.
 # OBS signs it alongside the UKI. The terminal signing stage replaces this
 # copy in XBOOTLDR with the signed artifact before publishing the disk image.

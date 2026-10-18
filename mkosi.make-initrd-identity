@@ -1,0 +1,22 @@
+#!/usr/bin/bash
+# SPDX-License-Identifier: MIT
+set -euo pipefail
+
+# The generic initrd is shared by desktop images. Append each image's real
+# identity before signing the UKI so native factory-reset matching works from
+# the first generator/udev invocation, without weakening its identity checks.
+release=${BUILDROOT:?}/usr/lib/os-release
+grep -Fxq "IMAGE_ID=\"${IMAGE_ID:?}\"" "${release}" || {
+    echo 'proto: image identity missing from os-release; refusing mismatched initrd' >&2
+    exit 1
+}
+work=$(mktemp -d)
+trap 'rm -rf -- "${work}"' EXIT
+install -D -m 0644 "${release}" "${work}/usr/lib/os-release"
+find "${work}" -exec touch --no-dereference --date="@${SOURCE_DATE_EPOCH:?}" {} +
+install -d -m 0755 "${ARTIFACTDIR:?}/io.mkosi.initrd"
+(
+    cd "${work}"
+    find usr -print0 | LC_ALL=C sort -z |
+        cpio --quiet --null --create --format=newc --reproducible --owner=0:0
+) >"${ARTIFACTDIR}/io.mkosi.initrd/90-proto-identity.cpio"
