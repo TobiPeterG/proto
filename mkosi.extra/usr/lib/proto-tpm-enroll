@@ -9,7 +9,7 @@ systemd-analyze condition ConditionSecurity=uefi-secureboot ConditionSecurity=me
 device="$(cryptsetup status root | sed -n 's/^[[:space:]]*device:[[:space:]]*//p')"
 [[ -b ${device} ]] && cryptsetup isLuks "${device}"
 [[ -r /run/systemd/tpm2-pcr-public-key.pem && -r /run/systemd/tpm2-pcr-signature.json ]]
-/usr/lib/systemd/systemd-pcrlock is-supported
+/usr/lib/systemd/systemd-pcrlock --quiet is-supported
 
 # Reuse the normal, short-lived cryptsetup kernel password cache when possible.
 key=/run/proto-tpm-enroll/passphrase
