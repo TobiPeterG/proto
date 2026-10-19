@@ -1,0 +1,38 @@
+#!/usr/bin/bash
+# SPDX-License-Identifier: MIT
+set -euo pipefail
+
+# Read the actual boot-disk GPT, not udev symlink availability. An existing
+# partition whose udev event is pending must never be treated as missing.
+# Exit 3 means confirmed absence; all other failures are errors, not permission
+# to provision another USER volume.
+disk="$(/usr/lib/proto-boot-disk)" || exit 1
+root_type="$(systemd-id128 show --value --uuid root)" || exit 1
+[[ ${root_type} =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || exit 1
+table="$(sfdisk --json "${disk}")" || exit 1
+device="$(jq -er --arg disk "${disk}" --arg root "${root_type}" '
+    .partitiontable
+    | if .label != "gpt" or .device != $disk or (.partitions | type) != "array" then
+        error("invalid boot-disk partition table")
+      else .partitions end
+    | map(select((.type | ascii_downcase) == $root or .name == "USER"))
+    | if length == 0 then ""
+      elif length != 1 then error("ambiguous USER/root partitions")
+      elif (.[0].type | ascii_downcase) != $root or .[0].name != "USER" then
+        error("unexpected USER/root partition identity")
+      elif (.[0].node | type) != "string" or (.[0].node | startswith("/dev/") | not) then
+        error("invalid USER device path")
+      else .[0].node end
+' <<<"${table}")" || exit 1
+[[ -n ${device} ]] || exit 3
+
+# Normally the kernel node already exists. If not, wait for this node only,
+# without waiting for every device or for unrelated udev event processing.
+if [[ ! -b ${device} ]]; then
+    udevadm wait --timeout=60 --initialized=no "${device}" || exit 1
+fi
+[[ -b ${device} ]] && cryptsetup isLuks "${device}" || {
+    echo "proto: existing USER at ${device} is unavailable or not LUKS; refusing provisioning" >&2
+    exit 1
+}
+readlink -f -- "${device}" || exit 1

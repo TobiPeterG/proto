@@ -45,8 +45,6 @@ case ${1:?prepare or enroll required} in
 prepare)
     umask 0077
     echo 'proto: preparing USER provisioning' >&2
-    udevadm settle --timeout=60
-    dd if=/dev/urandom of="${key}" bs=64 count=1 status=none
     reset_status=0
     reset_state="$(/usr/lib/systemd/systemd-factory-reset status)" || reset_status=$?
     [[ ${reset_status} == 0 || ${reset_status} == 10 || ${reset_status} == 11 ]] || {
@@ -55,6 +53,7 @@ prepare)
     }
     case ${reset_state} in
         on)
+            dd if=/dev/urandom of="${key}" bs=64 count=1 status=none
             : >"${reset_marker}"
             : >"${marker}"
             echo 'proto: explicit factory reset; recreate and provision USER in this boot' >&2
@@ -63,11 +62,15 @@ prepare)
         off|unspecified|unsupported|pending|complete) ;;
         *) echo "proto: unexpected factory-reset state '${reset_state}'" >&2; exit 1 ;;
     esac
-    if ! root_device >/dev/null; then
+    probe_status=0
+    device="$(/usr/lib/proto-user-device)" || probe_status=$?
+    case ${probe_status} in
+    3)
         echo 'proto: USER is absent; provisioning required after repart' >&2
+        dd if=/dev/urandom of="${key}" bs=64 count=1 status=none
         : >"${marker}"
-    else
-        device="$(root_device)"
+        ;;
+    0)
         echo "proto: existing encrypted USER at ${device}; preserving its keys and data" >&2
         # A keyslot number does not identify its owner. A public token records
         # our bootstrap transaction, but never authorizes automatic erasure.
@@ -75,13 +78,24 @@ prepare)
                 jq -e 'any(.tokens[]?; .type == "proto-user-bootstrap" and .protoProvisioning == 1)' >/dev/null; then
             echo 'proto: incomplete USER provisioning detected; use the passphrase if already set, otherwise request an explicit factory reset; automatic erasure is disabled' >&2
         fi
-    fi
+        ;;
+    *)
+        echo 'proto: cannot safely determine USER state; refusing provisioning' >&2
+        exit 1
+        ;;
+    esac
     ;;
 enroll)
     [[ -e ${marker} ]] || exit 0
     trap cleanup_failed_enrollment EXIT
-    udevadm settle --timeout=60
-    device="$(root_device enroll)" || { echo 'proto: repart did not create USER' >&2; exit 1; }
+    if ! device="$(root_device enroll)"; then
+        # Repart has finished formatting. Wait only for the native root link
+        # needed by this boot, not for unrelated devices to finish probing.
+        root_link=/dev/gpt-auto-root-luks
+        [[ ! -e ${reset_marker} ]] || root_link=/dev/gpt-auto-root-luks-ignore-factory-reset
+        udevadm wait --timeout=60 --initialized=no "${root_link}"
+        device="$(root_device enroll)" || { echo 'proto: repart did not create USER' >&2; exit 1; }
+    fi
     [[ ! -e /dev/mapper/root ]] || {
         echo 'proto: root mapper already exists; refusing concurrent bootstrap enrollment' >&2
         exit 1

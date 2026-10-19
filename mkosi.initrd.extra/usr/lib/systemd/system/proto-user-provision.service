@@ -5,7 +5,7 @@ ConditionKernelCommandLine=!proto.installer=yes
 ConditionPathExists=/etc/initrd-release
 ConditionPathExists=/run/proto-user-provision.required
 Requires=systemd-repart.service
-After=systemd-repart.service systemd-udev-settle.service initrd-usr-fs.target
+After=systemd-repart.service initrd-usr-fs.target
 Before=initrd-root-fs.target sysroot.mount initrd-switch-root.target systemd-factory-reset-complete.service
 Before=systemd-cryptsetup@root.service
 Conflicts=shutdown.target

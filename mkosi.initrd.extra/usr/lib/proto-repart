@@ -16,10 +16,25 @@ fi
 # with the bootstrap key, exactly as on normal first boot.
 reset_options=(--defer-partitions-factory-reset=no)
 disk="$(/usr/lib/proto-boot-disk)"
+key_options=()
+if [[ -e /run/proto-user-provision.required ]]; then
+    [[ -s /run/proto-user-provision.key ]] || {
+        echo 'proto: provisioning requested without a bootstrap key; refusing repart' >&2
+        exit 1
+    }
+    key_options=(--key-file=/run/proto-user-provision.key)
+else
+    # Never let failure to discover an existing USER turn into keyless volume
+    # creation. Re-check immediately before normal partition maintenance.
+    /usr/lib/proto-user-device >/dev/null || {
+        echo 'proto: ordinary boot requires an existing encrypted USER; refusing repart' >&2
+        exit 1
+    }
+fi
 echo "proto: provisioning partitions on boot-loader disk ${disk}" >&2
 
 exec systemd-repart --dry-run=no \
     --definitions="${source_root}/usr/lib/repart.d" \
     --copy-source="${source_root}" \
-    --key-file=/run/proto-user-provision.key \
+    "${key_options[@]}" \
     "${reset_options[@]}" "${disk}"
