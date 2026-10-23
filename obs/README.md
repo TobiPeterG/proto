@@ -30,8 +30,9 @@ after changing image packages:
 Each existing desktop job also exports its versioned `.buildroot.tar.xz`,
 convenience checksum and native `.buildroot.manifest`. No extra OBS package
 is needed for the export. `KDE-root`/`GNOME-root` do not include mkosi-obs's
-disk-signing hooks; their OBS drop-in only installs the same public Verity
-certificate as the disk stage. The exported filesystem keeps its RPM database,
+disk-signing hooks. They inherit the public Verity certificate from the main
+image's mkosi-obs integration, just like the disk stage.
+The exported filesystem keeps its RPM database,
 while the disk stage strips package metadata before producing EROFS.
 
 The export names deliberately begin with `proto-kde`/`proto-gnome`, matching
