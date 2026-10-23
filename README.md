@@ -105,11 +105,12 @@ The configuration requires mkosi 27 or newer:
 PATH="$PATH:/usr/sbin" mkosi -f build
 ```
 
-Build one desktop and its base dependency with:
+Build one desktop and its transitive build-root/base dependencies with an
+explicit release version:
 
 ```sh
-PATH="$PATH:/usr/sbin" mkosi --dependency= --dependency=base --dependency=KDE -f build
-PATH="$PATH:/usr/sbin" mkosi --dependency= --dependency=base --dependency=GNOME -f build
+PATH="$PATH:/usr/sbin" mkosi --image-version=VERSION --dependency= --dependency=KDE -f build
+PATH="$PATH:/usr/sbin" mkosi --image-version=VERSION --dependency= --dependency=GNOME -f build
 ```
 
 Each desktop produces:
@@ -118,6 +119,71 @@ Each desktop produces:
 - an unsigned or OBS-signed UKI, depending on the build environment;
 - compressed split `/usr` and usr-verity partition artifacts;
 - a Verity root-hash artifact, checksums and a package manifest.
+
+### Desktop-specific build roots
+
+`KDE-root` and `GNOME-root` construct each complete desktop filesystem exactly
+once. They own the desktop package list, desktop `mkosi.extra` tree and
+filesystem finalization. The existing `base` image remains an internal common
+dependency; it is not the reference filesystem for future desktop extensions.
+Both `base` and the desktop roots retain their RPM databases. The KDE/GNOME
+disk stages use their corresponding root via `BaseTrees=`, install no further
+packages, and explicitly clean package metadata from their own copy before
+creating EROFS/Verity, the initrd, UKI and installer add-on.
+
+Each desktop also produces:
+
+- `proto-DESKTOP_VERSION_ARCH.buildroot/`: the local native `BaseTrees=` input;
+- `proto-DESKTOP_VERSION_ARCH.buildroot.tar.xz`: a portable build input;
+- `proto-DESKTOP_VERSION_ARCH.buildroot.tar.xz.sha256`: its checksum;
+- `proto-DESKTOP_VERSION_ARCH.buildroot.manifest`: mkosi's package inventory.
+
+The export preserves numeric ownership, permissions, hardlinks, symlinks,
+ACLs, capabilities and SELinux xattrs, and excludes transient runtime/cache
+contents. It streams tar through XZ with two threads, avoiding an extra
+uncompressed tar and unbounded compression memory use. Export fails if the
+RPM database, release identity or native manifest is missing. The directory
+remains available for the disk stage or future sysext stages. Build roots are
+not bootable images and contain no installer account or TPM enrollment state.
+
+To build just a desktop root without a disk image or default initrd:
+
+```sh
+PATH="$PATH:/usr/sbin" mkosi --image-version=VERSION --dependency= --dependency=KDE-root -f build
+```
+
+Use `GNOME-root` for the other desktop. An extension built against the archive
+must use the matching desktop, release and architecture, and compatible RPM
+inputs. Do not use a moving latest build root or mix packages from a newer
+Tumbleweed snapshot.
+
+Both the exported root and installed OS set `SYSEXT_LEVEL` in
+`/usr/lib/os-release` to `IMAGE_ID-IMAGE_VERSION`, for example
+`proto-kde-26.1` or `proto-gnome-26.1`. The distribution `ID` is unchanged.
+With `Format=sysext`, mkosi inherits this level into the extension's
+`/usr/lib/extension-release.d/extension-release.NAME`. Native systemd-sysext
+matching therefore rejects extensions for another desktop or release, and
+checks the extension's architecture as well. Do not override the level or use
+`ID=_any` to bypass these checks. This is compatibility metadata, not a
+signature; authenticated extension images are still required. Updating the OS
+requires matching extensions for its new release before they can be merged.
+The disk packaging and root export reject mismatching compatibility metadata.
+
+Future extension recipes and their update integration
+are separate work; the export alone does not implement those policies.
+
+OBS builds export the corresponding root in the existing per-desktop package.
+Artifact names start with the desktop `ImageId`, so mkosi-obs carries the
+archive, checksum and manifest through its signing rounds. They do not match
+the disk/UKI mutation globs in Proto's terminal signing hook. Authenticate the
+published build input through the repository's signed checksum manifest; the
+adjacent `.sha256` file is only a convenience checksum, not a signature.
+No private signing key is placed in these roots.
+
+Full desktop directories and their compressed archives increase worker disk
+usage. Measure peak usage on the first OBS build and retain the existing
+disk-space constraint; streaming export avoids one extra raw copy but does
+not eliminate the additional artifacts.
 
 For OBS builds, the first stage compresses the split `/usr` and usr-verity
 artifacts with XZ and removes their raw copies. The complete disk crosses into

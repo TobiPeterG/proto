@@ -5,3 +5,4 @@
 /mkosi.pkgcache/
 /zypper/
 __pycache__
+/tests/

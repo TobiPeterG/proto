@@ -1,0 +1,39 @@
+#!/usr/bin/bash
+set -euo pipefail
+
+# Bind extensions to one desktop deployment, not Tumbleweed's rolling VERSION_ID.
+# Do not sanitize versions: that could give different releases the same level.
+case ${IMAGE_ID:?} in
+    proto-kde|proto-gnome) ;;
+    *) echo "proto: unexpected desktop build-root identity: ${IMAGE_ID}" >&2; exit 1 ;;
+esac
+level=${IMAGE_ID}-${IMAGE_VERSION:?}
+[[ ${level} =~ ^[a-z0-9._-]+$ ]] || {
+    echo "proto: invalid sysext compatibility level: ${level}" >&2
+    exit 1
+}
+release=${BUILDROOT:?}/usr/lib/os-release
+[[ -s ${release} ]] || {
+    echo 'proto: desktop build root has no os-release' >&2
+    exit 1
+}
+sed -i '/^SYSEXT_LEVEL=/d' "${release}"
+printf 'SYSEXT_LEVEL="%s"\n' "${level}" >> "${release}"
+
+# Files used by the installed system belong to the desktop root
+source_dir=
+for candidate in "${CHROOT_SRCDIR:?}" /usr/src/packages/SOURCES/*; do
+    if [[ -s ${candidate}/mkosi.keys/obs-project.pgp.b64 ]]; then
+        source_dir=${candidate}
+        break
+    fi
+done
+[[ -n ${source_dir} ]] || {
+    echo 'proto: OBS public key not found while preparing desktop build root' >&2
+    exit 1
+}
+
+install -d -m 0755 "${BUILDROOT:?}/usr/lib/systemd"
+base64 -d "${source_dir}/mkosi.keys/obs-project.pgp.b64" \
+    > "${BUILDROOT}/usr/lib/systemd/import-pubring.pgp"
+chmod 0644 "${BUILDROOT}/usr/lib/systemd/import-pubring.pgp"

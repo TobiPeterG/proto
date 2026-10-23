@@ -18,7 +18,7 @@ Keep `_constraints` in both OBS packages. The initial build and its signing
 follow-up then contain only one desktop image each.
 
 The `Packages=` lists in `mkosi.obs/*.conf` contain the union of the base,
-default-initrd and matching desktop images. OBS resolves RPM dependencies from
+matching desktop root, default-initrd and disk images. OBS resolves RPM dependencies from
 the entry recipe before mkosi evaluates `mkosi.images/`. Regenerate both lists
 after changing image packages:
 
@@ -26,3 +26,17 @@ after changing image packages:
 ./update-obs-packages.py
 ./update-obs-packages.py --check
 ```
+
+Each existing desktop job also exports its versioned `.buildroot.tar.xz`,
+convenience checksum and native `.buildroot.manifest`. No extra OBS package
+is needed for the export. `KDE-root`/`GNOME-root` do not include mkosi-obs's
+disk-signing hooks; their OBS drop-in only installs the same public Verity
+certificate as the disk stage. The exported filesystem keeps its RPM database,
+while the disk stage strips package metadata before producing EROFS.
+
+The export names deliberately begin with `proto-kde`/`proto-gnome`, matching
+mkosi-obs's artifact carry-forward convention. Keep these files through all
+signing rounds and include them in the repository's signed checksum listing.
+The source service definitions and desktop marker selection stay unchanged.
+Account for both the retained directory and the XZ export when measuring
+worker disk requirements.

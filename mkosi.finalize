@@ -3,6 +3,13 @@ set -euo pipefail
 
 root=${BUILDROOT:?}
 
+# Packaging must retain the desktop root's exact extension compatibility level.
+# Refuse a stale BaseTrees= input rather than publishing an incompatible OS.
+grep -Fxq "SYSEXT_LEVEL=\"${IMAGE_ID:?}-${IMAGE_VERSION:?}\"" "${root}/usr/lib/os-release" || {
+    echo 'proto: disk image and desktop build-root sysext levels differ' >&2
+    exit 1
+}
+
 # mkosi-obs injects the current OBS project certificate for PE/UKI signing.
 # systemd-sysupdate verifies SHA256SUMS.gpg with the corresponding public
 # OpenPGP key embedded in the immutable /usr image.
@@ -33,11 +40,6 @@ uki="${IMAGE_ID}_${IMAGE_VERSION:?mkosi image version is required}_${ARCHITECTUR
 install -d -m 0755 "${root}/boot/EFI/Linux/${uki}.extra.d"
 install -m 0644 "${addon}" \
     "${root}/boot/EFI/Linux/${uki}.extra.d/10-proto-installer.addon.efi"
-
-install -d -m 0755 "${root}/usr/lib/systemd"
-base64 -d "${source_dir}/mkosi.keys/obs-project.pgp.b64" \
-    > "${root}/usr/lib/systemd/import-pubring.pgp"
-chmod 0644 "${root}/usr/lib/systemd/import-pubring.pgp"
 
 case ${IMAGE_ID:?mkosi did not export IMAGE_ID} in
     proto-gnome) metainfo=${source_dir}/io.github.TobiPeterG.Proto.GNOME.metainfo.xml ;;

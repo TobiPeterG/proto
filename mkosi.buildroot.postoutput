@@ -1,0 +1,68 @@
+#!/usr/bin/bash
+set -euo pipefail
+
+case ${IMAGE_ID:?} in
+    proto-kde|proto-gnome) ;;
+    *) echo "proto: unexpected desktop build-root identity: ${IMAGE_ID}" >&2; exit 1 ;;
+esac
+for value in "${IMAGE_VERSION:?}" "${ARCHITECTURE:?}"; do
+    [[ ${value} =~ ^[A-Za-z0-9._+-]+$ ]] || {
+        echo 'proto: invalid version/architecture in build-root output name' >&2
+        exit 1
+    }
+done
+
+name=${IMAGE_ID}_${IMAGE_VERSION}_${ARCHITECTURE}.buildroot
+root=${OUTPUTDIR:?}/${name}
+archive=${root}.tar.xz
+checksum=${archive}.sha256
+[[ -d ${root} && ! -L ${root} ]] || {
+    echo "proto: desktop build-root directory missing: ${root}" >&2
+    exit 1
+}
+database=${root}/usr/lib/sysimage/rpm
+[[ -d ${database} && -n $(find "${database}" -mindepth 1 -maxdepth 1 -type f -size +0c -print -quit) ]] || {
+    echo 'proto: desktop build root has no RPM database; refusing unusable export' >&2
+    exit 1
+}
+for field in "IMAGE_ID=\"${IMAGE_ID}\"" "IMAGE_VERSION=\"${IMAGE_VERSION}\"" \
+    "SYSEXT_LEVEL=\"${IMAGE_ID}-${IMAGE_VERSION}\""; do
+    grep -Fxq "${field}" "${root}/usr/lib/os-release" || {
+        echo "proto: desktop build-root identity mismatch: ${field}" >&2
+        exit 1
+    }
+done
+[[ -s ${root}.manifest ]] || {
+    echo 'proto: native package manifest missing from desktop build root' >&2
+    exit 1
+}
+
+temporary=
+checksum_temporary=
+cleanup() {
+    [[ -z ${temporary} ]] || rm -f -- "${temporary}"
+    [[ -z ${checksum_temporary} ]] || rm -f -- "${checksum_temporary}"
+    return 0
+}
+trap cleanup EXIT
+temporary=$(mktemp "${archive}.tmp.XXXXXX")
+checksum_temporary=$(mktemp "${checksum}.tmp.XXXXXX")
+
+tar --create --file=- --directory="${root}" \
+    --sort=name --format=pax --numeric-owner --sparse \
+    --acls --selinux --xattrs --xattrs-include='*' \
+    --pax-option=exthdr.name=%d/PaxHeaders/%f,delete=atime,delete=ctime \
+    --mtime="@${SOURCE_DATE_EPOCH:?}" --clamp-mtime \
+    --exclude='./dev/*' --exclude='./proc/*' --exclude='./sys/*' \
+    --exclude='./run/*' --exclude='./tmp/*' --exclude='./var/tmp/*' \
+    --exclude='./var/cache/*' --exclude='./work' \
+    . | xz --threads=2 -6 --stdout > "${temporary}"
+chmod 0644 "${temporary}"
+mv -f -- "${temporary}" "${archive}"
+(
+    cd "${OUTPUTDIR}"
+    sha256sum -- "${name}.tar.xz"
+) > "${checksum_temporary}"
+chmod 0644 "${checksum_temporary}"
+mv -f -- "${checksum_temporary}" "${checksum}"
+echo "Exported desktop build root: ${name}.tar.xz"

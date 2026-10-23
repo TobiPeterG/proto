@@ -15,8 +15,8 @@ RECIPES = {
     "kde": REPO_ROOT / "mkosi.obs" / "kde.conf",
 }
 IMAGES = {
-    "gnome": ("base", "default-initrd", "GNOME"),
-    "kde": ("base", "default-initrd", "KDE"),
+    "gnome": ("base", "GNOME-root", "default-initrd", "GNOME"),
+    "kde": ("base", "KDE-root", "default-initrd", "KDE"),
 }
 PACKAGE_FIELDS = ("Packages", "BuildPackages", "InitrdPackages")
 # Required by the host-side mkosi tooling in OBS, not installed into an image.
