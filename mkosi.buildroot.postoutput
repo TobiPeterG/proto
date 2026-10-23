@@ -32,11 +32,6 @@ for field in "IMAGE_ID=\"${IMAGE_ID}\"" "IMAGE_VERSION=\"${IMAGE_VERSION}\"" \
         exit 1
     }
 done
-[[ -s ${root}.manifest ]] || {
-    echo 'proto: native package manifest missing from desktop build root' >&2
-    exit 1
-}
-
 temporary=
 checksum_temporary=
 cleanup() {

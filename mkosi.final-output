@@ -31,6 +31,10 @@ BuildScripts=%D/mkosi.final-output
 RECIPE
     fi
 
+    # Upstream regenerates the next signing recipe. Retain the first-stage
+    # epoch rather than deriving a new timestamp for each signing round.
+    printf '\n[Content]\nSourceDateEpoch=%s\n' "${SOURCE_DATE_EPOCH:?}" >> "${recipe}"
+
     # mkosi-obs assumes a UKI matching <name>.raw.zst belongs in that disk's
     # ESP. Proto keeps the UKI in XBOOTLDR instead. Before a UKI-only signing
     # round, hide the combined image behind a distinct hand-off name so the

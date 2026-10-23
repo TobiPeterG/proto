@@ -113,12 +113,24 @@ PATH="$PATH:/usr/sbin" mkosi --image-version=VERSION --dependency= --dependency=
 PATH="$PATH:/usr/sbin" mkosi --image-version=VERSION --dependency= --dependency=GNOME -f build
 ```
 
+`mkosi.configure` chooses one `SourceDateEpoch` from the start time of the
+current mkosi invocation. All subimages use the same value, while a later
+dependency-triggered OBS build gets a fresh value even if Git did not change.
+The epoch is logged, and OBS signing recipes retain it through every signing
+round. Configure hooks run at build time, so `mkosi summary` does not show
+the automatically selected value.
+
+To reproduce timestamps from an earlier build, supply its logged epoch with
+`--source-date-epoch=SECONDS` or `SOURCE_DATE_EPOCH=SECONDS`. An explicit value
+is never replaced. Matching timestamps alone do not reproduce an image: the
+RPM inputs and other build inputs must also match.
+
 Each desktop produces:
 
 - an XZ-compressed complete disk image;
 - an unsigned or OBS-signed UKI, depending on the build environment;
 - compressed split `/usr` and usr-verity partition artifacts;
-- a Verity root-hash artifact, checksums and a package manifest.
+- a Verity root-hash artifact and checksums.
 
 ### Desktop-specific build roots
 
@@ -135,16 +147,24 @@ Each desktop also produces:
 
 - `proto-DESKTOP_VERSION_ARCH.buildroot/`: the local native `BaseTrees=` input;
 - `proto-DESKTOP_VERSION_ARCH.buildroot.tar.xz`: a portable build input;
-- `proto-DESKTOP_VERSION_ARCH.buildroot.tar.xz.sha256`: its checksum;
-- `proto-DESKTOP_VERSION_ARCH.buildroot.manifest`: mkosi's package inventory.
+- `proto-DESKTOP_VERSION_ARCH.buildroot.tar.xz.sha256`: its checksum.
 
 The export preserves numeric ownership, permissions, hardlinks, symlinks,
 ACLs, capabilities and SELinux xattrs, and excludes transient runtime/cache
 contents. It streams tar through XZ with two threads, avoiding an extra
 uncompressed tar and unbounded compression memory use. Export fails if the
-RPM database, release identity or native manifest is missing. The directory
+RPM database or release identity is missing. The directory
 remains available for the disk stage or future sysext stages. Build roots are
 not bootable images and contain no installer account or TPM enrollment state.
+
+Package manifests are disabled for the base, desktop roots and disk images:
+no current build or runtime component consumes them, and mkosi's layered RPM
+inventory can be incomplete with reproducible installation timestamps.
+Extension builds use the retained RPM database, not a JSON package inventory.
+Repository `SHA256SUMS`/`SHA256SUMS.gpg` authentication remains enabled; these
+checksum manifests are independent of package inventories. Future sysext
+recipes can enable their own package manifests if their management tools need
+them.
 
 To build just a desktop root without a disk image or default initrd:
 
@@ -174,7 +194,7 @@ are separate work; the export alone does not implement those policies.
 
 OBS builds export the corresponding root in the existing per-desktop package.
 Artifact names start with the desktop `ImageId`, so mkosi-obs carries the
-archive, checksum and manifest through its signing rounds. They do not match
+archive and checksum through its signing rounds. They do not match
 the disk/UKI mutation globs in Proto's terminal signing hook. Authenticate the
 published build input through the repository's signed checksum manifest; the
 adjacent `.sha256` file is only a convenience checksum, not a signature.

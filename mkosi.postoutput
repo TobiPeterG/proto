@@ -55,3 +55,6 @@ cat >> "${recipe}" <<'RECIPE'
 [Content]
 BuildScripts=%D/mkosi.final-output
 RECIPE
+
+# Signing is a continuation of this build, not a new timestamped image build.
+printf '\n[Content]\nSourceDateEpoch=%s\n' "${SOURCE_DATE_EPOCH:?}" >> "${recipe}"
