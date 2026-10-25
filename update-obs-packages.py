@@ -20,7 +20,7 @@ IMAGES = {
 }
 PACKAGE_FIELDS = ("Packages", "BuildPackages", "InitrdPackages")
 # Required by the host-side mkosi tooling in OBS, not installed into an image.
-EXTRA_PACKAGES = {"python3-pefile"}
+EXTRA_PACKAGES = {"python3-pefile", "rpm-build"}
 
 
 def load_summary() -> dict[str, dict]:

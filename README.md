@@ -100,18 +100,8 @@ authenticate the repository checksum manifest.
 ## Building
 
 The configuration requires mkosi 27 or newer:
-
-```sh
-PATH="$PATH:/usr/sbin" mkosi -f build
-```
-
-Build one desktop and its transitive build-root/base dependencies with an
-explicit release version:
-
-```sh
-PATH="$PATH:/usr/sbin" mkosi --image-version=VERSION --dependency= --dependency=KDE -f build
-PATH="$PATH:/usr/sbin" mkosi --image-version=VERSION --dependency= --dependency=GNOME -f build
-```
+the `KDE` and `GNOME` dependency targets include their transitive desktop-root
+and base dependencies. `ImageVersion` identifies the resulting release.
 
 `mkosi.configure` chooses one `SourceDateEpoch` from the start time of the
 current mkosi invocation. All subimages use the same value, while a later
@@ -120,9 +110,9 @@ The epoch is logged, and OBS signing recipes retain it through every signing
 round. Configure hooks run at build time, so `mkosi summary` does not show
 the automatically selected value.
 
-To reproduce timestamps from an earlier build, supply its logged epoch with
-`--source-date-epoch=SECONDS` or `SOURCE_DATE_EPOCH=SECONDS`. An explicit value
-is never replaced. Matching timestamps alone do not reproduce an image: the
+An explicit `--source-date-epoch=SECONDS` or `SOURCE_DATE_EPOCH=SECONDS`
+overrides automatic timestamp selection and is never replaced. Matching
+timestamps alone do not reproduce an image: the
 RPM inputs and other build inputs must also match.
 
 Each desktop produces:
@@ -166,16 +156,10 @@ checksum manifests are independent of package inventories. Future sysext
 recipes can enable their own package manifests if their management tools need
 them.
 
-To build just a desktop root without a disk image or default initrd:
-
-```sh
-PATH="$PATH:/usr/sbin" mkosi --image-version=VERSION --dependency= --dependency=KDE-root -f build
-```
-
-Use `GNOME-root` for the other desktop. An extension built against the archive
-must use the matching desktop, release and architecture, and compatible RPM
-inputs. Do not use a moving latest build root or mix packages from a newer
-Tumbleweed snapshot.
+The `KDE-root` and `GNOME-root` dependency targets produce desktop roots
+without a disk image or default initrd. Extension compatibility depends on
+matching desktop, release, architecture and RPM inputs; a moving latest alias
+or packages from a newer Tumbleweed snapshot do not guarantee that match.
 
 Both the exported root and installed OS set `SYSEXT_LEVEL` in
 `/usr/lib/os-release` to `IMAGE_ID-IMAGE_VERSION`, for example
@@ -183,8 +167,8 @@ Both the exported root and installed OS set `SYSEXT_LEVEL` in
 With `Format=sysext`, mkosi inherits this level into the extension's
 `/usr/lib/extension-release.d/extension-release.NAME`. Native systemd-sysext
 matching therefore rejects extensions for another desktop or release, and
-checks the extension's architecture as well. Do not override the level or use
-`ID=_any` to bypass these checks. This is compatibility metadata, not a
+checks the extension's architecture as well. Overridden levels or `ID=_any`
+bypass these compatibility checks. This is compatibility metadata, not a
 signature; authenticated extension images are still required. Updating the OS
 requires matching extensions for its new release before they can be merged.
 The disk packaging and root export reject mismatching compatibility metadata.
@@ -195,15 +179,14 @@ are separate work; the export alone does not implement those policies.
 OBS builds export the corresponding root in the existing per-desktop package.
 Artifact names start with the desktop `ImageId`, so mkosi-obs carries the
 archive and checksum through its signing rounds. They do not match
-the disk/UKI mutation globs in Proto's terminal signing hook. Authenticate the
-published build input through the repository's signed checksum manifest; the
+the disk/UKI mutation globs in Proto's terminal signing hook. The repository's
+signed checksum manifest authenticates the published build input; the
 adjacent `.sha256` file is only a convenience checksum, not a signature.
 No private signing key is placed in these roots.
 
 Full desktop directories and their compressed archives increase worker disk
-usage. Measure peak usage on the first OBS build and retain the existing
-disk-space constraint; streaming export avoids one extra raw copy but does
-not eliminate the additional artifacts.
+usage. Streaming export avoids one extra raw copy but does not eliminate the
+additional artifacts or their contribution to peak worker disk usage.
 
 For OBS builds, the first stage compresses the split `/usr` and usr-verity
 artifacts with XZ and removes their raw copies. The complete disk crosses into
@@ -219,14 +202,8 @@ target is a 32 GB device or larger.
 
 ## Installation
 
-The desktop images remain self-installing live media. Write the compressed raw
-image to a USB device, for example:
-
-```sh
-xzcat mkosi.output/proto-gnome_20260831_x86-64.raw.xz | \
-    sudo dd of=/dev/disk/by-id/<usb-device> bs=16M status=progress
-sync
-```
+The desktop images are self-installing live media distributed as
+XZ-compressed raw disk images.
 
 On first boot, the installer initrd uses `systemd-repart` to create an
 unencrypted TIKSTATE Btrfs partition with the native root GPT type in the USB's
@@ -297,8 +274,7 @@ remain usable. NetworkManager and OpenVPN configuration, timezone data,
 AccountsService profiles, Bluetooth pairings and fingerprint enrollment data
 are migrated as well when present.
 
-Installation erases the selected disk. Test the workflow with a disposable
-virtual disk before using physical hardware.
+Installation erases the selected disk.
 
 ### Future installer instantiation
 
@@ -369,7 +345,7 @@ mutable data. It does not modify `$BOOT` or either A/B system slot.
 
 The `base` subimage contains the shared boot, hardware, networking, update and
 filesystem stack. KDE and GNOME subimages add their desktop-specific packages.
-Ordinary applications should be installed as Flatpaks; host-level drivers,
+Ordinary applications are provided as Flatpaks; host-level drivers,
 storage tools and desktop integration belong in the immutable image.
 
 New local users get a Btrfs home subvolume. A `user@.service` drop-in creates
