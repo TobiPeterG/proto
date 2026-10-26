@@ -11,6 +11,7 @@ enable systemd-pcrlock-firmware-code.service
 # components before updates. Boot services below restore the new measurements.
 enable systemd-pcrlock.socket
 enable systemd-sysupdate-notify-pcrlock.socket
+enable systemd-sysext.service
 enable systemd-pcrlock-secureboot-authority.service
 enable systemd-pcrlock-secureboot-policy.service
 enable systemd-pcrlock-machine-id.service

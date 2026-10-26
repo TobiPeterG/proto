@@ -1,0 +1,221 @@
+.TH PROTO-SYSEXT 8 "2026-10-26" "Proto" "System Administration"
+.SH NAME
+proto-sysext \- signed extension repositories and lockstep OS features
+.SH SYNOPSIS
+.B proto-sysext
+.RB [ --repo " ID"]
+.RB [ --json ]
+.I COMMAND
+.RI [ NAME ]
+.SH DESCRIPTION
+Discovers extension images for the running desktop, architecture and exact OS
+image version using authenticated SHA256SUMS listings. Lower numeric repository
+priorities take precedence. Equal-priority providers for the same extension are
+an error. Authentication or network failures are not silently bypassed by
+falling back to a lower-priority repository.
+.PP
+Native transfer definitions are the source of truth for the configured update
+source. Feature definitions and their drop-ins determine enablement; downloaded
+versions are read from the image directory. There is no persistent installation
+database. These describe current configuration, not proof of which server
+historically supplied existing image bytes.
+.PP
+HTTPS source URLs are normalized for hostname case, default port 443 and trailing
+slashes, then matched against repository configuration. All aliases for an equal
+URL are reported. A source without a matching repository is reported as
+unconfigured. Redirects and shared signing keys do not imply equal repository
+identity. The same URL under a different alias is not a vendor change.
+.PP
+An enabled or downloaded extension stays with its configured URL during an
+ordinary install, even when a higher-priority provider becomes available.
+Repository disablement excludes discovery; changing or removing native transfer
+configuration is a separate operation.
+.SH COMMANDS
+.PP
+Commands that change persistent configuration, images, activation or catalog
+caches first display a categorized change summary and require confirmation.
+Enter y to proceed, n (or Enter) to cancel, or d to display detailed changes
+and return to the prompt. Non-interactive mutations require explicit approval
+options. Dry runs and
+unchanged installations do not prompt. Signing-key imports are separate shared
+trust changes with their own summary, details and confirmation; an approved key
+import is retained even if a later installation is cancelled. Installation
+discovery does not update the persistent catalog cache; explicit refresh does.
+.PP
+-y or --assume-yes accepts transaction confirmations automatically, while still
+printing the summary. It does not accept unknown signing keys. --accept-keys
+separately accepts new repository signing keys into the shared systemd trust
+store after verifying the fetched key against the catalog signature. This grants
+system-wide trust and does not independently authenticate the key's owner.
+Use both options for unattended changes that may introduce new trusted keys.
+Either option may appear before or after the command. --accept-keys does not
+imply --assume-yes. Dry runs never import keys, even with both options.
+.TP
+.B repos
+Lists configured repositories, priorities, enablement and public-key URLs without downloading.
+.TP
+.B refresh
+Requires root. Refreshes and caches authenticated repository listings. Unknown
+signers trigger interactive key review; approval imports the key into systemd's
+shared trust store. Already trusted signers do not prompt again. Non-interactive
+refresh only accepts an unknown key when --accept-keys was explicitly supplied.
+.TP
+.BI "repo add " "ID URL"
+Requires root. Adds local repository configuration. --priority selects the
+numeric priority; --key-url specifies a public-key location. --replace explicitly
+overrides an existing definition. Adding a repository does not trust its key.
+.TP
+.BI "repo remove " ID
+Requires root. Masks the repository with a local /dev/null symlink, including
+vendor definitions. Refuses removal while the current deployment has registered
+extensions using that URL and no remaining alias for the URL exists. Shared
+trusted keys are not revoked.
+.TP
+.B list
+Lists compatible extensions from verified repository listings together with
+their configured source and preferred available provider. --installed-only
+restricts the result to enabled or downloaded extensions.
+.TP
+.BI search " TEXT"
+Filters list output by an extension-name substring. Supports --installed-only.
+.TP
+.BI info " NAME"
+Downloads the optional per-image JSON, verifies its checksum against the signed
+listing, and displays compatibility and package information.
+.TP
+.B installed
+Reads owned effective feature/transfer definitions and downloaded image names.
+--all also includes disabled definitions without images. Drop-ins are read in
+native directory/filename precedence; manually edited source URLs and feature
+enablement are reflected without another registration record.
+.TP
+.BI install " NAME"
+Requires root. Downloads using systemd-pull with the authenticated file digest,
+checks embedded release metadata and Verity through systemd-dissect, installs
+the read-only image, creates native feature/transfer definitions, and refreshes
+systemd-sysext. Same-source images already present are reused without overwriting.
+--install-from REPO (alias --from) selects a source explicitly, regardless of
+priority and forces a fresh verified installation even when the URL is unchanged.
+Replacing an enabled/downloaded extension's source additionally
+requires --allow-vendor-change. That option without --install-from permits
+selection of the best-priority compatible provider. Vendor means the normalized
+source URL here, not the RPM Vendor field.
+.TP
+.BI switch-repo " REPO"
+Explicitly switches all currently enabled owned extensions also published for
+the running image in REPO. Others are reported as skipped and not removed.
+All replacements are downloaded and verified before any image/configuration
+changes. The operation itself grants vendor-change permission.
+.PP
+install, remove and switch-repo accept -D or --dry-run. A dry run reports the
+plan without changing files, importing keys or downloading image payloads.
+Uncached catalog retrieval may still require the network; unknown keys require
+a separate interactive refresh. Read-only dry runs do not require root.
+.PP
+Vendor switches replace directory entries atomically rather than overwriting
+mounted image inodes. The previous bytes/configuration are held temporarily
+until a forced systemd-sysext refresh succeeds; ordinary command failures restore
+them and retry the old merge. This is not a durable power-loss transaction journal.
+Administrator drop-ins that override the requested source/enablement cause a
+failure and rollback rather than a silent partial switch. Unmanaged files are
+not adopted. Modifications to transfer ownership patterns/target paths are
+rejected instead of guessing which files can be replaced or deleted.
+.TP
+.BI remove " NAME"
+Requires root. Disables the owned feature, invokes sysupdate vacuum with only
+that extension's definitions, and refreshes systemd-sysext. Disabled definitions
+remain available for ownership tracking. All versions of that feature may be
+removed, including rollback versions. Unmanaged images/configuration are not
+adopted or overwritten.
+.SH REPOSITORY CONFIGURATION
+Each *.conf file defines one repository in a [Repository] section. Its basename
+is the repository ID. Files with the same basename override lower-precedence
+files. The search order, from lowest to highest precedence, is:
+.PP
+/usr/lib/proto-sysext/repos.d/
+.br
+/usr/local/lib/proto-sysext/repos.d/
+.br
+/run/proto-sysext/repos.d/
+.br
+/etc/proto-sysext/repos.d/
+.PP
+A same-named symlink to /dev/null masks a repository. Root operations reject
+non-root-owned or group/world-writable configuration files.
+.TP
+.B URL=
+HTTPS repository base URL. Plain filenames are read from SHA256SUMS; directory
+traversal, URL credentials, query strings and systemd specifiers are rejected.
+.TP
+.B Priority=
+Integer from 0 to 999999; defaults to 99. Lower values are preferred.
+.TP
+.B Enabled=
+Boolean, default yes.
+.TP
+.B KeyURL=
+Optional HTTPS URL for public-key retrieval when the signer is not already
+trusted. Defaults to repodata/repomd.xml.key below the repository URL. Only
+one primary key may be returned, and it must actually verify the downloaded
+listing before the user is asked to trust it. Keys are not stored in repository
+configuration and are never accepted automatically.
+.SH TRUST MODEL
+The manager verifies repository listings with the same shared OpenPGP trust
+store as systemd-sysupdate, including its version-dependent keyring precedence.
+systemd 261 prefers a local keyring over the vendor ring; 262 combines them.
+Effective public keyrings are imported into a temporary GnuPG home; automatic
+signer/keyserver retrieval is disabled.
+Initial image downloads and optional JSON files are checked against those
+authenticated hashes. Embedded metadata must match ID, SYSEXT_LEVEL,
+SYSEXT_VERSION_ID, SYSEXT_ID and architecture; metadata is never executed.
+.PP
+On first use, an unknown signer may be reviewed during an interactive root
+refresh or install. The prompt displays the full primary fingerprint and the
+repository/key URLs. This is trust-on-first-use: downloading the public key
+from the same server is not independent authentication. A negative answer,
+non-interactive input, key/signature mismatch, bad signature or multiple-key
+response does not import anything. Approval preserves existing keys and adds
+the accepted public key to /etc/systemd/import-pubring.pgp atomically.
+.PP
+Trust applies to all systemd imports, not just that repository. Any key in the
+shared store may authorize any configured repository; this matches native
+sysupdate semantics and is not per-repository key pinning. Configured repositories
+must be trusted to supply privileged /usr content. Removing a repository does
+not automatically revoke shared keys. Cached listings are reverified against
+the current shared store whenever used.
+.SH LOCKSTEP UPDATES
+Images are named sysext-NAME-IMAGEID_IMAGEVERSION_ARCH.raw.zst. The image version
+equals the OS IMAGE_VERSION. Composite independent extension versions are not
+accepted. Tool versions remain in optional signed JSON. Published resources
+for an OS version are immutable; extension-only rebuilds require a new OS release
+to be offered as an update.
+.PP
+Generated definitions in /etc/sysupdate.d enable one optional feature per
+extension. Transfers run before the UKI transfer, protect the running version
+and retain two instances, aligned with Proto's A/B policy. Missing extensions
+for an enabled feature prevent a newer OS version from forming a complete
+update set. Existing sysupdated GUI workflows perform subsequent updates;
+the manager does not run another updater or download timer.
+.PP
+systemd-sysext activates only extensions matching the running OS's SYSEXT_LEVEL.
+The preset enables systemd-sysext.service for activation on boot. Explicit
+installation/removal refreshes the current merge immediately.
+.SH FILES
+.TP
+/var/cache/proto-sysext/REPO/URLHASH/
+Disposable public catalog/signature cache, refreshed explicitly or during
+installation. It is tied to the normalized URL, not installation ownership.
+.TP
+/etc/sysupdate.d/proto-sysext-*.feature
+Owned feature definitions, retained when disabled.
+.TP
+/etc/sysupdate.d/65-proto-sysext-*.transfer
+Owned native transfer definitions.
+.TP
+/var/lib/extensions/
+Read-only downloaded extension images. Incompatible OS versions remain unmerged.
+.SH SEE ALSO
+.BR systemd-sysupdate (8),
+.BR sysupdate.features (5),
+.BR systemd-sysext (8),
+.BR systemd-dissect (1)

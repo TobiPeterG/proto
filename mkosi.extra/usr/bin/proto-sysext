@@ -1,0 +1,921 @@
+#!/usr/bin/python3
+"""Signed repository discovery and sysupdate registration."""
+import argparse
+import configparser
+from contextlib import ExitStack
+from contextvars import ContextVar
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
+
+NAME = re.compile(r'[a-z0-9][a-z0-9-]{0,63}\Z')
+VERSION = re.compile(r'[0-9][a-z0-9.-]*\Z')
+FINGERPRINT = re.compile(r'(?:[A-F0-9]{40}|[A-F0-9]{64})\Z')
+MARKER = '# Managed by proto-sysext. Do not edit.\n'
+APPROVAL = ContextVar('approval', default=(False, False))
+CONFIG_DIRS = ('/usr/lib/proto-sysext/repos.d', '/usr/local/lib/proto-sysext/repos.d',
+               '/run/proto-sysext/repos.d', '/etc/proto-sysext/repos.d')
+KEYRINGS = ('/usr/lib/systemd/import-pubring.pgp', '/etc/systemd/import-pubring.pgp',
+            '/etc/systemd/import-pubring.gpg')
+
+
+def native_keyrings():
+    # 261 uses a local keyring INSTEAD of the vendor ring, 262 combines them.
+    # Always retain the same effective trust as the native download backend.
+    vendor, local, legacy = map(Path, KEYRINGS)
+    user = local if local.exists() else legacy
+    selected = [user] if user.is_file() else []
+    if not selected or systemd_version() >= 262:
+        selected.append(vendor)
+    return [str(p) for p in selected if p.is_file()]
+
+
+def systemd_version():
+    result = command([native_tool('systemd'), '--version'], capture_output=True, text=True)
+    match = re.match(r'systemd\s+(\d+)', result.stdout)
+    if not match:
+        raise ValueError('Cannot determine native systemd trust-store semantics')
+    return int(match[1])
+
+
+def command(argv, **kwargs):
+    return subprocess.run(argv, check=True, **kwargs)
+
+
+def url(value):
+    parsed = urllib.parse.urlsplit(value)
+    if (parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password
+            or parsed.query or parsed.fragment or re.search(r'[\s%\\]', value)):
+        raise ValueError('Repository/key URLs must be plain HTTPS URLs without credentials or specifiers')
+    return value
+
+
+def source_url(value):
+    parsed = urllib.parse.urlsplit(url(value))
+    host = parsed.hostname.lower()
+    if ':' in host:
+        host = '[' + host + ']'
+    port = parsed.port
+    authority = host + (':' + str(port) if port and port != 443 else '')
+    return urllib.parse.urlunsplit(('https', authority, parsed.path.rstrip('/') + '/', '', ''))
+
+
+class HTTPSRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, message, headers, newurl):
+        if urllib.parse.urlsplit(newurl).scheme != 'https':
+            raise ValueError('Refusing non-HTTPS redirect')
+        return super().redirect_request(request, fp, code, message, headers, newurl)
+
+
+def fetch(address, maximum=4 * 1024 * 1024):
+    with urllib.request.build_opener(HTTPSRedirect()).open(address, timeout=60) as response:
+        data = response.read(maximum + 1)
+    if len(data) > maximum:
+        raise ValueError('Repository metadata exceeds size limit')
+    return data
+
+
+def read_release(text):
+    result = {}
+    for line in text.splitlines():
+        if not line.strip() or line.startswith('#'):
+            continue
+        key, separator, value = line.partition('=')
+        words = shlex.split(value)
+        if not separator or len(words) != 1:
+            raise ValueError('Invalid release metadata')
+        result[key] = words[0]
+    return result
+
+
+@dataclass(frozen=True)
+class Repository:
+    name: str
+    address: str
+    priority: int
+    key_url: str = ''
+    enabled: bool = True
+
+    def key(self):
+        return fetch(self.key_url or self.address + 'repodata/repomd.xml.key')
+
+
+def repositories(directories=CONFIG_DIRS):
+    # Higher-precedence directories replace files with the same basename.
+    files = {}
+    for directory in directories:
+        files.update({p.name: p for p in Path(directory).glob('*.conf')})
+    result = []
+    for basename, path in sorted(files.items()):
+        if path.is_symlink() and path.resolve() == Path('/dev/null'):
+            continue
+        name = Path(basename).stem
+        if not NAME.fullmatch(name):
+            raise ValueError(f'Invalid repository identifier: {name}')
+        info = path.stat()
+        if os.geteuid() == 0 and (info.st_uid != 0 or info.st_mode & 0o022):
+            raise ValueError(f'Root operations require root-owned, non-writable repository config: {path}')
+        config = configparser.ConfigParser(interpolation=None)
+        config.read_string(path.read_text())
+        if config.sections() != ['Repository'] or config.defaults():
+            raise ValueError(f'Expected one [Repository] section in {path}')
+        section = config['Repository']
+        known = {'url', 'priority', 'keyurl', 'enabled'}
+        if set(section) - known:
+            raise ValueError(f'Unknown repository options in {path}: {set(section) - known}')
+        priority = section.getint('Priority', fallback=99)
+        key_url = section.get('KeyURL', '')
+        if not 0 <= priority <= 999999:
+            raise ValueError(f'Invalid repository priority in {path}')
+        result.append(Repository(name, source_url(section['URL']), priority,
+                                 url(key_url) if key_url else '',
+                                 section.getboolean('Enabled', fallback=True)))
+    return sorted(result, key=lambda r: (r.priority, r.name))
+
+
+def primary_fingerprints(text):
+    result, primary = set(), False
+    for line in text.splitlines():
+        fields = line.split(':')
+        if fields[0] == 'pub':
+            primary = True
+        elif fields[0] == 'sub':
+            primary = False
+        elif fields[0] == 'fpr' and primary:
+            result.add(fields[9])
+            primary = False
+    return result
+
+
+class UnknownSigner(ValueError):
+    pass
+
+
+class TrustStore:
+    def __init__(self, rings=None, local=Path('/etc/systemd/import-pubring.pgp')):
+        self.rings, self.local = native_keyrings() if rings is None else rings, local
+
+    def __enter__(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='proto-sysext-key-')
+        self.home = Path(self.temp.name)
+        try:
+            self.gpg = ['gpg', '--homedir', str(self.home), '--batch', '--no-auto-key-retrieve',
+                        '--no-auto-key-import']
+            for ring in self.rings:
+                if Path(ring).is_file():
+                    command(self.gpg + ['--import', ring], capture_output=True)
+            return self
+        except BaseException:
+            self.temp.cleanup()
+            raise
+
+    def __exit__(self, *args):
+        self.temp.cleanup()
+
+    def verify(self, data, signature):
+        payload, sig = self.home / 'SHA256SUMS', self.home / 'SHA256SUMS.gpg'
+        payload.write_bytes(data)
+        sig.write_bytes(signature)
+        result = subprocess.run(self.gpg + ['--status-fd=1', '--verify', str(sig), str(payload)],
+                                capture_output=True, text=True)
+        if result.returncode != 0:
+            if '[GNUPG:] NO_PUBKEY ' in result.stdout:
+                raise UnknownSigner('Repository signer is not in the shared systemd trust store')
+            raise ValueError('Repository signature verification failed')
+        valid = re.findall(r'^\[GNUPG:\] VALIDSIG (.*)$', result.stdout, re.M)
+        if len(valid) != 1:
+            raise ValueError('Repository signature has no valid signer')
+        fields = valid[0].split()
+        return fields[-1] if FINGERPRINT.fullmatch(fields[-1]) else fields[0]
+
+    def import_key(self, data):
+        command(self.gpg + ['--import'], input=data, capture_output=True)
+
+    def fingerprints(self):
+        listed = command(self.gpg + ['--with-colons', '--list-keys'], capture_output=True, text=True)
+        return primary_fingerprints(listed.stdout)
+
+    def save(self):
+        if os.geteuid() != 0:
+            raise ValueError('Adding a shared trusted key requires root')
+        exported = command(self.gpg + ['--export'], capture_output=True).stdout
+        atomic_write(self.local, exported)
+
+
+def confirm_changes(categories, details, *, trust=False):
+    """Review a transaction before persistent changes"""
+    print('\nPlanned changes:', file=sys.stderr)
+    for category, items in categories.items():
+        if items:
+            print(f'  {category} ({len(items)}): ' + ', '.join(items), file=sys.stderr)
+    assume_yes, accept_keys = APPROVAL.get()
+    accepted = accept_keys if trust else assume_yes
+    if accepted:
+        print('Accepted via ' + ('--accept-keys' if trust else '--assume-yes') + '.', file=sys.stderr)
+        return
+    if not sys.stdin.isatty():
+        option = '--accept-keys' if trust else '--assume-yes'
+        raise ValueError(f'Confirmation requires an interactive terminal or explicit {option}. No changes made')
+    while True:
+        print('Continue? [y/N/d] (d: details) ', end='', file=sys.stderr, flush=True)
+        try:
+            answer = input().strip().lower()
+        except EOFError:
+            answer = 'n'
+        if answer in ('y', 'yes'):
+            return
+        if answer in ('', 'n', 'no'):
+            raise ValueError('Operation cancelled')
+        if answer == 'd':
+            print('\n' + '\n'.join(details) + '\n', file=sys.stderr)
+        else:
+            print('Enter y, n or d.', file=sys.stderr)
+
+
+def approve_key(repository, fingerprint):
+    if os.geteuid() != 0:
+        raise ValueError('Adding a shared trusted key requires root')
+    print(f'\nRepository: {repository.name}\nURL: {repository.address}\n'
+          f'Key URL: {repository.key_url or repository.address + "repodata/repomd.xml.key"}\n'
+          f'Primary key fingerprint: {fingerprint}\n'
+          'WARNING: accepting this key grants shared systemd import trust, not just trust for this repository.\n'
+          'The first key is not independently authenticated. Compare its fingerprint with a trusted source.\n',
+          file=sys.stderr, flush=True)
+    try:
+        confirm_changes({'Shared trust': [fingerprint]},
+                        ['Import this public key into /etc/systemd/import-pubring.pgp.',
+                         'This authorizes systemd imports from any repository signed by this key.'], trust=True)
+        return True
+    except ValueError:
+        return False
+
+
+def verify_catalog(repository, data, signature, prompt=False, rings=None,
+                   local=Path('/etc/systemd/import-pubring.pgp')):
+    with TrustStore(rings, local) as trust:
+        try:
+            return trust.verify(data, signature)
+        except UnknownSigner:
+            if not prompt:
+                raise UnknownSigner(f'{repository.name}: unknown signing key. Refresh interactively as root')
+            # Check the downloaded key against this very signature before asking
+            # for approval.
+            with TrustStore(()) as candidate:
+                candidate.import_key(repository.key())
+                fingerprints = candidate.fingerprints()
+                if len(fingerprints) != 1:
+                    raise ValueError('Repository key URL must supply exactly one primary key')
+                signer = candidate.verify(data, signature)
+                if signer not in fingerprints:
+                    raise ValueError('Fetched key does not match the repository signer')
+                if not approve_key(repository, signer):
+                    raise ValueError('Repository key was not accepted')
+                public = command(candidate.gpg + ['--export', signer], capture_output=True).stdout
+                trust.import_key(public)
+                trust.verify(data, signature)
+                trust.save()
+                return signer
+
+
+def manifest(data):
+    result = {}
+    for line in data.decode('ascii').splitlines():
+        match = re.fullmatch(r'([a-fA-F0-9]{64}) [ *]([A-Za-z0-9][A-Za-z0-9._+-]*)', line)
+        if not match:
+            raise ValueError('Invalid SHA256SUMS entry (only plain filenames are accepted)')
+        digest, filename = match.groups()
+        if filename.startswith('BEST-BEFORE-'):
+            if datetime.now(timezone.utc).date() > date.fromisoformat(filename.removeprefix('BEST-BEFORE-')):
+                raise ValueError('Repository checksum listing has expired')
+            continue
+        if filename in result and result[filename] != digest.lower():
+            raise ValueError('Conflicting checksums in repository listing')
+        result[filename] = digest.lower()
+    return result
+
+
+def catalog(repository, prompt=False, cache=None, refresh=False):
+    # An alias may be repointed at a different URL.
+    identity = hashlib.sha256(source_url(repository.address).encode()).hexdigest()
+    directory = cache / repository.name / identity if cache else None
+    if directory and not refresh and all((directory / f).is_file() for f in ('SHA256SUMS', 'SHA256SUMS.gpg')):
+        data = (directory / 'SHA256SUMS').read_bytes()
+        signature = (directory / 'SHA256SUMS.gpg').read_bytes()
+    else:
+        data = fetch(repository.address + 'SHA256SUMS')
+        signature = fetch(repository.address + 'SHA256SUMS.gpg')
+    # Reject unsafe/expired listings before importing any new key.
+    listing = manifest(data)
+    signer = verify_catalog(repository, data, signature, prompt)
+    if directory and refresh:
+        atomic_write(directory / 'SHA256SUMS', data)
+        atomic_write(directory / 'SHA256SUMS.gpg', signature)
+    return listing, signer
+
+
+@dataclass(frozen=True)
+class Host:
+    distribution: str
+    image: str
+    version: str
+    architecture: str
+
+    @classmethod
+    def current(cls):
+        release = read_release(Path('/usr/lib/os-release').read_text())
+        image, version = release['IMAGE_ID'], release['IMAGE_VERSION']
+        if not NAME.fullmatch(image) or not VERSION.fullmatch(version):
+            raise ValueError('Host lacks a supported image identity/version')
+        if release.get('SYSEXT_LEVEL') != image + '-' + version:
+            raise ValueError('Host does not use exact desktop/release SYSEXT_LEVEL matching')
+        arch = {'x86_64': 'x86-64', 'aarch64': 'arm64', 'ppc64le': 'ppc64-le',
+                'armv7l': 'arm'}.get(os.uname().machine, os.uname().machine)
+        return cls(release['ID'], image, version, arch)
+
+    def candidates(self, listing):
+        pattern = re.compile(r'sysext-(?P<name>[a-z0-9][a-z0-9-]{0,63})-' + re.escape(self.image) +
+                             r'_(?P<version>[0-9][a-z0-9.-]*)_' + re.escape(self.architecture) + r'\.raw\.zst\Z')
+        return [(m['name'], filename) for filename in listing
+                if (m := pattern.fullmatch(filename)) and m['version'] == self.version]
+
+
+def atomic_write(path, data, mode=0o644):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix='.' + path.name + '.', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(data.encode() if isinstance(data, str) else data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(name, mode)
+        os.replace(name, path)
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
+def native_tool(name):
+    for path in (Path('/usr/lib/systemd') / name, Path('/usr/bin') / name):
+        if path.is_file():
+            return str(path)
+    found = shutil.which(name)
+    if found:
+        return found
+    raise ValueError(f'Required native tool is missing: {name}')
+
+
+def definitions(name, repository, host):
+    feature = 'proto-sysext-' + name
+    stem = f'sysext-{name}-{host.image}'
+    description = f'{name} system extension'
+    return (MARKER + f'[Feature]\nDescription={description}\nEnabled=yes\n',
+            MARKER + f'''[Transfer]
+Features={feature}
+ProtectVersion=%A
+Verify=yes
+
+[Source]
+Type=url-file
+Path={repository.address}
+MatchPattern={stem}_@v_%a.raw.zst
+
+[Target]
+Type=regular-file
+Path=/var/lib/extensions
+MatchPattern={stem}_@v_%a.raw
+Mode=0444
+InstancesMax=2
+''')
+
+
+def compatible(release, host, name):
+    expected = dict(ID=host.distribution, SYSEXT_LEVEL=host.image + '-' + host.version,
+                    SYSEXT_ID='sysext-' + name + '-' + host.image,
+                    SYSEXT_VERSION_ID=host.version, ARCHITECTURE=host.architecture)
+    if any(release.get(k) != v for k, v in expected.items()) or 'system' not in release.get('SYSEXT_SCOPE', '').split():
+        raise ValueError('Downloaded extension does not match its named host/desktop/version')
+
+
+def effective_definition(basename, directories):
+    files = [Path(d) / basename for d in directories]
+    primary = next((p for p in reversed(files) if p.exists() or p.is_symlink()), None)
+    masked = primary is not None and primary.is_symlink() and primary.resolve() == Path('/dev/null')
+    config = configparser.ConfigParser(interpolation=None, strict=False, inline_comment_prefixes=None)
+    dropins = {}
+    for directory in directories:
+        dropins.update({p.name: p for p in (Path(directory) / (basename + '.d')).glob('*.conf')})
+    if primary and not masked:
+        config.read_string(primary.read_text())
+        for _, path in sorted(dropins.items()):
+            if not (path.is_symlink() and path.resolve() == Path('/dev/null')):
+                config.read_string(path.read_text())
+    if config.defaults():
+        raise ValueError('DEFAULT sections are not supported in native sysupdate definitions')
+    return primary, config
+
+
+class Changes:
+    """Temporary rollback data only."""
+    def __init__(self):
+        self.files = {}
+
+    def write(self, path, data):
+        if path not in self.files:
+            if path.is_symlink():
+                raise ValueError(f'Refusing to replace configuration symlink: {path}')
+            self.files[path] = (path.read_bytes(), path.stat().st_mode & 0o777) if path.exists() else None
+        atomic_write(path, data)
+
+    def rollback(self):
+        for path, old in reversed(list(self.files.items())):
+            if old is None:
+                path.unlink(missing_ok=True)
+            else:
+                atomic_write(path, *old)
+
+
+class Manager:
+    def __init__(self, repos, host, etc=Path('/etc/sysupdate.d'),
+                 extensions=Path('/var/lib/extensions'), cache=Path('/var/cache/proto-sysext'),
+                 definition_dirs=None):
+        self.configured, self.host = repos, host
+        self.repos = sorted((r for r in repos if r.enabled), key=lambda r: (r.priority, r.name))
+        self.etc, self.extensions, self.cache = etc, extensions, cache
+        self.confirm = None
+        self.definition_dirs = definition_dirs or (
+            ('/usr/lib/sysupdate.d', '/usr/local/lib/sysupdate.d', '/run/sysupdate.d', etc)
+            if etc == Path('/etc/sysupdate.d') else (etc,))
+
+    def paths(self, name):
+        if not NAME.fullmatch(name):
+            raise ValueError('Invalid extension name')
+        return self.etc / f'proto-sysext-{name}.feature', self.etc / f'65-proto-sysext-{name}.transfer'
+
+    def override(self, path):
+        return path.parent / (path.name + '.d') / '90-proto-sysext.conf'
+
+    def images(self, name):
+        pattern = re.compile(r'sysext-' + re.escape(name + '-' + self.host.image) +
+                             r'_[0-9][a-z0-9.-]*_' + re.escape(self.host.architecture) + r'\.raw\Z')
+        return sorted(p for p in self.extensions.glob('*.raw') if pattern.fullmatch(p.name))
+
+    def registrations(self):
+        names = set()
+        for directory in self.definition_dirs:
+            for path in Path(directory).glob('65-proto-sysext-*.transfer'):
+                name = path.name.removeprefix('65-proto-sysext-').removesuffix('.transfer')
+                if NAME.fullmatch(name):
+                    names.add(name)
+        result = {}
+        for name in sorted(names):
+            feature, transfer = self.paths(name)
+            primary, config = effective_definition(transfer.name, self.definition_dirs)
+            if not primary or not primary.read_text().startswith(MARKER):
+                continue
+            _, enabled_config = effective_definition(feature.name, self.definition_dirs)
+            enabled = enabled_config.getboolean('Feature', 'Enabled', fallback=False)
+            address = source_url(config.get('Source', 'Path'))
+            aliases = [r.name for r in self.configured if source_url(r.address) == address]
+            result[name] = dict(name=name, enabled=enabled, source_url=address,
+                                repositories=aliases, configured=bool(aliases),
+                                images=[p.name for p in self.images(name)], transfer=config)
+        return result
+
+    def installed(self, all_definitions=False):
+        return [{k: v for k, v in record.items() if k != 'transfer'}
+                for record in self.registrations().values()
+                if all_definitions or record['enabled'] or record['images']]
+
+    def validate_registration(self, name, record):
+        cfg = record['transfer']
+        stem = f'sysext-{name}-{self.host.image}'
+        expected = {('Source', 'Type'): 'url-file', ('Source', 'MatchPattern'): stem + '_@v_%a.raw.zst',
+                    ('Target', 'Type'): 'regular-file', ('Target', 'Path'): '/var/lib/extensions',
+                    ('Target', 'MatchPattern'): stem + '_@v_%a.raw',
+                    ('Transfer', 'Features'): 'proto-sysext-' + name}
+        if any(cfg.get(section, key, fallback=None) != value for (section, key), value in expected.items()):
+            raise ValueError(f'{name}: unsupported modified transfer.')
+
+    def providers(self, prompt=False, refresh=False, only=None):
+        result = {}
+        repos = [r for r in self.repos if not only or r.name == only]
+        if only and not repos:
+            raise ValueError('Repository is not configured or enabled: ' + only)
+        for repo in repos:
+            # Discovery for an installation is read-only apart from separately
+            # approved trust imports. Only refresh persists catalogs.
+            listing, signer = catalog(repo, prompt=prompt, cache=None if refresh else self.cache, refresh=refresh)
+            for name, filename in self.host.candidates(listing):
+                result.setdefault(name, []).append(dict(repository=repo, filename=filename,
+                    digest=listing[filename], listing=listing, signer=signer))
+        return result
+
+    def preferred(self, name, candidates):
+        if not candidates:
+            raise ValueError('No compatible extension: ' + name)
+        best = candidates[0]
+        ties = [c for c in candidates if c['repository'].priority == best['repository'].priority]
+        if len({source_url(c['repository'].address) for c in ties}) > 1:
+            raise ValueError(f'Ambiguous equal-priority providers for {name}')
+        return best
+
+    def available(self, prompt=False, refresh=False):
+        return {name: self.preferred(name, candidates)
+                for name, candidates in self.providers(prompt, refresh).items()}
+
+    def select(self, name, candidates, allow_vendor_change=False, install_from=None):
+        records = self.registrations()
+        record = records.get(name)
+        pinned = record and (record['enabled'] or record['images'])
+        if install_from:
+            candidates = [c for c in candidates if c['repository'].name == install_from]
+        elif pinned and not allow_vendor_change:
+            candidates = [c for c in candidates
+                          if source_url(c['repository'].address) == record['source_url']]
+            if not candidates:
+                raise ValueError(f'{name}: pinned source is unavailable. Use --allow-vendor-change to switch explicitly')
+        candidate = self.preferred(name, candidates)
+        changed = pinned and source_url(candidate['repository'].address) != record['source_url']
+        if changed and not allow_vendor_change:
+            raise ValueError(f'{name}: repository change requires --allow-vendor-change')
+        return candidate
+
+    def info(self, candidate):
+        filename = candidate['filename'].removesuffix('.raw.zst') + '.json'
+        if filename not in candidate['listing']:
+            return None
+        data = fetch(candidate['repository'].address + filename)
+        if hashlib.sha256(data).hexdigest() != candidate['listing'][filename]:
+            raise ValueError('Compatibility JSON checksum mismatch')
+        result = json.loads(data)
+        name = next(n for n, f in self.host.candidates({candidate['filename']: ''}) if f == candidate['filename'])
+        compatible(result, self.host, name)
+        return result
+
+    def plan(self, name, candidate, reinstall=False):
+        feature, transfer = self.paths(name)
+        for path in (feature, transfer, self.override(feature), self.override(transfer)):
+            if path.exists() and not path.read_text().startswith(MARKER):
+                raise ValueError(f'Refusing to replace unmanaged configuration: {path}')
+        record = self.registrations().get(name)
+        if record:
+            self.validate_registration(name, record)
+        address = source_url(candidate['repository'].address)
+        target = self.extensions / candidate['filename'].removesuffix('.zst')
+        changed = record is not None and address != record['source_url']
+        if target.is_symlink():
+            raise ValueError('Refusing to replace an image symlink')
+        if target.exists() and not record:
+            raise ValueError('Refusing to adopt an unmanaged image')
+        return dict(name=name, candidate=candidate, target=target, replace=changed,
+                    download=not target.exists() or changed or reinstall,
+                    source=record['source_url'] if record else None, destination=address)
+
+    def apply(self, plans, dry_run=False):
+        if dry_run:
+            return [dict(name=p['name'], source=p['source'], destination=p['destination'],
+                         download=p['download'], vendor_change=p['replace']) for p in plans]
+        if self.confirm and plans:
+            categories = {'Download': [], 'Repository switches': [], 'Configuration': [],
+                          'Activation': ['refresh system extensions']}
+            details = []
+            for plan in plans:
+                name = plan['name']
+                if plan['download']:
+                    categories['Download'].append(name)
+                    details.append('Download and verify ' + plan['candidate']['repository'].address +
+                                   plan['candidate']['filename'] + '\n  Install as ' + str(plan['target']))
+                if plan['replace']:
+                    categories['Repository switches'].append(name)
+                categories['Configuration'].append('enable ' + name)
+                feature, transfer = self.paths(name)
+                details.append(f'{name}: source {plan["source"] or "(none)"} -> {plan["destination"]}\n'
+                               f'  Enable feature using {self.override(feature)}\n'
+                               f'  Set transfer source using {self.override(transfer)}')
+                if not transfer.exists():
+                    details.append(f'  Create {transfer} and, if absent, {feature}')
+            details.append('Force systemd-sysext refresh. Restore previous files/configuration if activation fails.')
+            self.confirm(categories, details)
+        self.extensions.mkdir(parents=True, exist_ok=True)
+        changes, replaced = Changes(), []
+        with ExitStack() as stack:
+            prepared = []
+            # Verify EVERY replacement before changing any image or definition.
+            for plan in plans:
+                if not plan['download']:
+                    continue
+                directory = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix='.proto-sysext-', dir=self.extensions)))
+                incoming = directory / plan['target'].name
+                candidate = plan['candidate']
+                command([native_tool('systemd-pull'), 'raw', '--direct', '--verify=' + candidate['digest'],
+                         candidate['repository'].address + candidate['filename'], str(incoming)])
+                embedded = command([native_tool('systemd-dissect'), '--read-only',
+                                    '--image-policy=root=verity+signed', '--copy-from', str(incoming),
+                                    '/usr/lib/extension-release.d/extension-release.' + plan['target'].stem, '-'],
+                                   capture_output=True, text=True)
+                if len(embedded.stdout) > 65536:
+                    raise ValueError('Oversized embedded release metadata')
+                compatible(read_release(embedded.stdout), self.host, plan['name'])
+                os.chmod(incoming, 0o444)
+                prepared.append((plan, incoming, directory / 'previous.raw'))
+            try:
+                for plan, incoming, backup in prepared:
+                    target = plan['target']
+                    if target.exists():
+                        os.link(target, backup)
+                        os.replace(incoming, target)  # never overwrite a mounted inode in place
+                        replaced.append((target, backup))
+                    else:
+                        os.link(incoming, target)  # atomic no-replace
+                        replaced.append((target, None))
+                for plan in plans:
+                    name, candidate = plan['name'], plan['candidate']
+                    feature, transfer = self.paths(name)
+                    if not transfer.exists():
+                        feature_text, transfer_text = definitions(name, candidate['repository'], self.host)
+                        changes.write(transfer, transfer_text)
+                        if not feature.exists():
+                            changes.write(feature, feature_text)
+                    changes.write(self.override(transfer), MARKER + '[Source]\nPath=' + plan['destination'] + '\n')
+                    changes.write(self.override(feature), MARKER + '[Feature]\nEnabled=yes\n')
+                    actual = self.registrations().get(name)
+                    if not actual or not actual['enabled'] or actual['source_url'] != plan['destination']:
+                        raise ValueError(f'{name}: a later native drop-in overrides the requested change')
+                # Names remain identical on a vendor switch. Force refresh so
+                # systemd does not mistake changed backing images for a no-op.
+                command(['systemd-sysext', '--always-refresh=yes', 'refresh'])
+            except BaseException:
+                changes.rollback()
+                for target, backup in reversed(replaced):
+                    if backup:
+                        os.replace(backup, target)
+                    else:
+                        target.unlink(missing_ok=True)
+                try:
+                    command(['systemd-sysext', '--always-refresh=yes', 'refresh'])
+                except Exception as error:
+                    print(f'proto-sysext: rollback files restored, but merge refresh failed: {error}', file=sys.stderr)
+                raise
+        return [dict(name=p['name'], repository=p['candidate']['repository'].name,
+                     vendor_change=p['replace']) for p in plans]
+
+    def install(self, name, candidate, allow_vendor_change=False, dry_run=False, reinstall=False):
+        record = self.registrations().get(name)
+        if record and (record['enabled'] or record['images']) and \
+                source_url(candidate['repository'].address) != record['source_url'] and not allow_vendor_change:
+            raise ValueError('Repository change requires --allow-vendor-change')
+        return self.apply([self.plan(name, candidate, reinstall)], dry_run)
+
+    def switch_repo(self, repository, dry_run=False):
+        providers = self.providers(prompt=not dry_run, refresh=not dry_run, only=repository)
+        plans, skipped = [], []
+        for name, record in self.registrations().items():
+            if not record['enabled']:
+                continue
+            if name not in providers:
+                skipped.append(dict(name=name, skipped='not published for the running image in target repository'))
+                continue
+            plans.append(self.plan(name, self.preferred(name, providers[name])))
+        return self.apply(plans, dry_run) + skipped if plans else skipped
+
+    def remove(self, name, dry_run=False):
+        record = self.registrations().get(name)
+        if not record:
+            raise ValueError('No owned native transfer for extension')
+        self.validate_registration(name, record)
+        if dry_run:
+            return [dict(name=name, remove=record['images'], source=record['source_url'])]
+        feature, transfer = self.paths(name)
+        if self.confirm:
+            self.confirm({'Disable': [name], 'Remove images': record['images'],
+                          'Activation': ['refresh system extensions']},
+                         [f'Write Enabled=no to {self.override(feature)}',
+                          *[f'Remove {self.extensions / image}' for image in record['images']],
+                          'Keep disabled feature/transfer definitions. Remove all image versions, including rollback versions.',
+                          'Run native sysupdate vacuum and force systemd-sysext refresh.'])
+        changes = Changes()
+        changes.write(self.override(feature), MARKER + '[Feature]\nEnabled=no\n')
+        if self.registrations()[name]['enabled']:
+            changes.rollback()
+            raise ValueError('A later feature drop-in prevents disabling the extension')
+        with tempfile.TemporaryDirectory(prefix='proto-sysext-remove-') as directory:
+            work = Path(directory)
+            # Generate the narrow ownership pattern ourselves, not arbitrary
+            # modified target paths from an administrator's transfer file.
+            text, rule = definitions(name, Repository('source', record['source_url'], 99), self.host)
+            (work / feature.name).write_text(text.replace('Enabled=yes', 'Enabled=no'))
+            (work / transfer.name).write_text(rule.replace('ProtectVersion=%A', 'ProtectVersion=')
+                                              .replace('/var/lib/extensions', str(self.extensions)))
+            command([native_tool('systemd-sysupdate'), '--definitions=' + str(work), 'vacuum'])
+        if self.images(name):
+            raise ValueError('Native vacuum left extension images behind. Disabled definitions retained for retry')
+        command(['systemd-sysext', '--always-refresh=yes', 'refresh'])
+        return [dict(name=name, removed=True)]
+
+
+def repository_add(name, address, priority=99, key_url='', replace=False,
+                   directory=Path('/etc/proto-sysext/repos.d'), directories=CONFIG_DIRS, confirm=None):
+    if not NAME.fullmatch(name) or not 0 <= priority <= 999999:
+        raise ValueError('Invalid repository ID or priority')
+    address = source_url(address)
+    key_url = url(key_url) if key_url else ''
+    existing = any((Path(d) / (name + '.conf')).exists() or (Path(d) / (name + '.conf')).is_symlink()
+                   for d in directories)
+    if existing and not replace:
+        raise ValueError('Repository already exists. --replace explicitly replaces its local configuration')
+    text = f'[Repository]\nURL={address}\nPriority={priority}\nEnabled=yes\n'
+    if key_url:
+        text += f'KeyURL={key_url}\n'
+    if confirm:
+        confirm({'Repository configuration': [('replace ' if existing else 'add ') + name]},
+                [f'Write {directory / (name + ".conf")}:\n{text}',
+                 'No signing key will be trusted and no installed extension source will be changed.'])
+    atomic_write(directory / (name + '.conf'), text)
+
+
+def repository_remove(name, configured, installed, directory=Path('/etc/proto-sysext/repos.d'), confirm=None):
+    if not NAME.fullmatch(name) or name not in {r.name for r in configured}:
+        raise ValueError('Repository is not configured')
+    address = source_url(next(r.address for r in configured if r.name == name))
+    alternatives = [r for r in configured if r.name != name and source_url(r.address) == address]
+    users = [r['name'] for r in installed if source_url(r['source_url']) == address] if not alternatives else []
+    if users:
+        raise ValueError('Remove registered extensions before removing their repository: ' + ', '.join(users))
+    if confirm:
+        confirm({'Repository configuration': ['remove ' + name]},
+                [f'Mask {directory / (name + ".conf")} with a /dev/null symlink.',
+                 f'Repository URL: {address}', 'Shared trusted keys will remain trusted.'])
+    # A mask also prevents a vendor definition from silently reappearing.
+    directory.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='.remove-', dir=directory) as temporary:
+        mask = Path(temporary) / 'mask'
+        mask.symlink_to('/dev/null')
+        os.replace(mask, directory / (name + '.conf'))
+
+
+def emit(rows, as_json=False):
+    if as_json or isinstance(rows, dict):
+        print(json.dumps(rows, indent=2))
+    else:
+        for row in rows:
+            print('  '.join(f'{key}={value}' for key, value in row.items()))
+
+
+def dispatch(args):
+    configured = repositories()
+    repos = [r for r in configured if r.enabled]
+    if args.repo:
+        repos = [r for r in repos if r.name == args.repo]
+        if not repos:
+            raise ValueError('Repository is not configured or enabled')
+    if args.action == 'repo':
+        if args.repo_action == 'add':
+            repository_add(args.name, args.url, args.priority, args.key_url, args.replace,
+                           confirm=confirm_changes)
+        else:
+            repository_remove(args.name, configured, Manager(configured, Host.current()).installed(),
+                              confirm=confirm_changes)
+        return
+    if args.action == 'repos':
+        rows = [dict(name=r.name, priority=r.priority, url=r.address, enabled=r.enabled,
+                     key_url=r.key_url or r.address + 'repodata/repomd.xml.key') for r in configured]
+    elif args.action == 'refresh':
+        rows = []
+        if repos:
+            confirm_changes({'Refresh catalog cache': [r.name for r in repos]},
+                            [f'{r.name}: fetch and authenticate {r.address}SHA256SUMS and SHA256SUMS.gpg. '
+                             'Replace its URL-specific cache under /var/cache/proto-sysext.' for r in repos])
+        for repository in repos:
+            listing, signer = catalog(repository, prompt=True, cache=Path('/var/cache/proto-sysext'), refresh=True)
+            rows.append(dict(repository=repository.name, files=len(listing), signer=signer))
+    else:
+        manager = Manager(configured, Host.current())
+        manager.confirm = confirm_changes
+        if args.action == 'installed':
+            rows = manager.installed(args.all)
+        elif args.action == 'remove':
+            rows = manager.remove(args.name, args.dry_run)
+        elif args.action == 'switch-repo':
+            rows = manager.switch_repo(args.repository, args.dry_run)
+        else:
+            forced = getattr(args, 'install_from', None) or args.repo
+            if args.repo and getattr(args, 'install_from', None) and args.repo != args.install_from:
+                raise ValueError('Conflicting --repo and --install-from selectors')
+            dry_run = getattr(args, 'dry_run', False)
+            registrations = manager.registrations()
+            current = registrations.get(getattr(args, 'name', ''))
+            if (args.action == 'install' and not forced and not args.allow_vendor_change
+                    and current and current['enabled']
+                    and f'sysext-{args.name}-{manager.host.image}_{manager.host.version}_{manager.host.architecture}.raw'
+                    in current['images']):
+                # A plain install is idempotent. Adding an unrelated repository
+                # must not prompt for its key just to keep an existing image.
+                emit([dict(name=args.name, unchanged=True, source_url=current['source_url'])], args.json)
+                return
+            providers = manager.providers(prompt=args.action == 'install' and not dry_run,
+                                          refresh=args.action == 'install' and not dry_run, only=forced)
+            if args.action in ('list', 'search'):
+                rows = []
+                for name in sorted(set(providers) | set(registrations)):
+                    record = registrations.get(name)
+                    installed = record and (record['enabled'] or record['images'])
+                    if args.installed_only and not installed:
+                        continue
+                    if args.action == 'search' and args.pattern.lower() not in name.lower():
+                        continue
+                    candidate = manager.preferred(name, providers[name]) if name in providers else None
+                    rows.append(dict(name=name, enabled=bool(record and record['enabled']),
+                                     installed_repositories=record['repositories'] if installed else [],
+                                     installed_source=record['source_url'] if installed else None,
+                                     available_repository=candidate['repository'].name if candidate else None,
+                                     filename=candidate['filename'] if candidate else None))
+            else:
+                if args.name not in providers:
+                    raise ValueError('No compatible extension in the configured repositories')
+                item = manager.select(args.name, providers[args.name],
+                                      getattr(args, 'allow_vendor_change', False), forced)
+                if args.action == 'info':
+                    rows = manager.info(item) or dict(filename=item['filename'], repository=item['repository'].name)
+                else:
+                    rows = manager.install(args.name, item, args.allow_vendor_change, dry_run,
+                                           reinstall=bool(args.install_from))
+    emit(rows, args.json)
+
+
+def dispatch_with_approvals(args):
+    token = APPROVAL.set((args.assume_yes, args.accept_keys))
+    try:
+        dispatch(args)
+    finally:
+        APPROVAL.reset(token)
+
+
+def main():
+    approval_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    approval_parser.add_argument('-y', '--assume-yes', action='store_true',
+                                 help='Accept transaction confirmations, but not unknown signing keys')
+    approval_parser.add_argument('--accept-keys', action='store_true',
+                                 help='Automatically trust verified repository signing keys system-wide')
+    # Accept approval switches before or after the command, including repo add/remove.
+    approvals, remaining = approval_parser.parse_known_args()
+    parser = argparse.ArgumentParser(description=__doc__, parents=[approval_parser], allow_abbrev=False)
+    parser.add_argument('--repo', help='Use only the named configured repository')
+    parser.add_argument('--json', action='store_true', help='Machine-readable output')
+    sub = parser.add_subparsers(dest='action', required=True)
+    for action in ('repos', 'refresh'):
+        sub.add_parser(action)
+    sub.add_parser('installed').add_argument('--all', action='store_true', help='Include disabled definitions without images')
+    for action in ('list', 'search'):
+        part = sub.add_parser(action)
+        part.add_argument('--installed-only', action='store_true')
+        if action == 'search':
+            part.add_argument('pattern')
+    sub.add_parser('info').add_argument('name')
+    install = sub.add_parser('install')
+    install.add_argument('name')
+    install.add_argument('--install-from', '--from', dest='install_from', help='Select a repository explicitly')
+    install.add_argument('--allow-vendor-change', action='store_true', help='Permit changing the installed source URL')
+    install.add_argument('-D', '--dry-run', action='store_true', help='Show the plan without changing files or trust')
+    remove = sub.add_parser('remove')
+    remove.add_argument('name')
+    remove.add_argument('-D', '--dry-run', action='store_true')
+    switch = sub.add_parser('switch-repo')
+    switch.add_argument('repository')
+    switch.add_argument('-D', '--dry-run', action='store_true')
+    repository = sub.add_parser('repo').add_subparsers(dest='repo_action', required=True)
+    add = repository.add_parser('add')
+    add.add_argument('name')
+    add.add_argument('url')
+    add.add_argument('--priority', type=int, default=99)
+    add.add_argument('--key-url', default='')
+    add.add_argument('--replace', action='store_true')
+    repository.add_parser('remove').add_argument('name')
+    args = parser.parse_args(remaining, namespace=approvals)
+    if args.action in ('install', 'remove', 'switch-repo', 'refresh', 'repo') and not getattr(args, 'dry_run', False):
+        if os.geteuid() != 0:
+            parser.error('Installation, removal, refresh and repository changes require root')
+        with Path('/run/proto-sysext.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            dispatch_with_approvals(args)
+    else:
+        dispatch_with_approvals(args)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (ValueError, KeyError, OSError, configparser.Error, subprocess.CalledProcessError) as error:
+        print(f'proto-sysext: {error}', file=sys.stderr)
+        sys.exit(1)
