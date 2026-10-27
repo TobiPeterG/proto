@@ -3,6 +3,7 @@
 set -euo pipefail
 # The initrd service uses RootDirectory=/sysroot and MountAPIVFS=yes
 . /usr/lib/os-release
-exec /usr/lib/proto-etc-factory select --state=/.system \
+export IMAGE_ETC_METADATA=.proto-etc-factory.json
+exec /usr/lib/image-etc-factory select --state=/.system \
     --version="${IMAGE_VERSION:?deployment version missing}" \
     --factory=/usr/share/factory/etc --relabel

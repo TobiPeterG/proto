@@ -1,3 +1,0 @@
-enable sddm.service
-disable display-manager-legacy.service
-enable plasma-setup.service

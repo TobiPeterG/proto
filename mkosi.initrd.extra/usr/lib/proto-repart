@@ -15,7 +15,7 @@ fi
 # Native reset detection authorizes erasure. Recreate USER in this same boot
 # with the bootstrap key, exactly as on normal first boot.
 reset_options=(--defer-partitions-factory-reset=no)
-disk="$(/usr/lib/proto-boot-disk)"
+disk="$(/usr/lib/image-boot-disk)"
 key_options=()
 if [[ -e /run/proto-user-provision.required ]]; then
     [[ -s /run/proto-user-provision.key ]] || {

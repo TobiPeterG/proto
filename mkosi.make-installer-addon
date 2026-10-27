@@ -2,6 +2,11 @@
 set -euo pipefail
 
 source=${1:?source tree required}
+resources_root=${OUTPUTDIR}/installer-resources
+[[ -d ${source}/mkosi.installer.sysext && -d ${source}/mkosi.installer.addon ]] || {
+    echo "Image installer role sources not found: ${source}" >&2
+    exit 1
+}
 root=${BUILDROOT:?}
 output=${2:?output path required}
 stamp=${SOURCE_DATE_EPOCH:-0}
@@ -24,18 +29,24 @@ cleanup() { rm -rf -- "${work}" "${staging}"; }
 trap cleanup EXIT
 addon_root=${work}/root
 confext_root=${work}/confext
+sysext_root=${work}/sysext
 install -d -m 0755 \
     "${addon_root}/proto-installer/sysext" \
     "${addon_root}/proto-installer/confext" \
-    "${confext_root}"
+    "${confext_root}" "${sysext_root}"
 cp -a "${source}/mkosi.installer.addon/." "${addon_root}/"
+cp -a "${source}/mkosi.installer.sysext/." "${sysext_root}/"
+install -d "${sysext_root}/usr/bin" "${sysext_root}/usr/lib" "${sysext_root}/usr/share/licenses"
+cp -a "${resources_root}/usr/bin/tik" "${sysext_root}/usr/bin/"
+cp -a "${resources_root}/usr/lib/tik" "${sysext_root}/usr/lib/"
+cp -a "${resources_root}/usr/share/licenses/tik" "${sysext_root}/usr/share/licenses/"
 
 # Bare EROFS images are valid systemd sysext/confext images. Keeping both in
 # the add-on initrd makes the immutable installed OS bit-identical to the live
 # OS and limits installer state to this signed companion image.
 mkfs.erofs --quiet --all-root -T"${stamp}" -zlz4hc \
     "${addon_root}/proto-installer/sysext/proto-installer.raw" \
-    "${source}/mkosi.installer.sysext"
+    "${sysext_root}"
 cp -a "${source}/mkosi.installer.confext/." "${confext_root}/"
 cp -a "${source}/mkosi.installer.${desktop}.confext/." "${confext_root}/"
 if [[ ${desktop} == gnome ]]; then

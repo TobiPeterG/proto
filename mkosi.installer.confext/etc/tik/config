@@ -1,6 +1,7 @@
 # Proto integration, separate from the reusable upstream TIK library.
 TIK_DEPLOY_COMMAND=/usr/lib/proto/tik-repart
 TIK_SELFDEPLOY_ONLY=1
+TIK_REQUIRE_SECURE_BOOT=1
 TIK_DEFER_ROOT_WITHOUT_MIGRATION=1
 TIK_LOG_FILE=/var/lib/tik/log/tik.log
 TIK_SOURCE_DEVICE_FILE=/run/proto-installer-source-device

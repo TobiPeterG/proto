@@ -15,12 +15,12 @@ RECIPES = {
     "kde": REPO_ROOT / "mkosi.obs" / "kde.conf",
 }
 IMAGES = {
-    "gnome": ("base", "GNOME-root", "default-initrd", "GNOME"),
-    "kde": ("base", "KDE-root", "default-initrd", "KDE"),
+    "gnome": ("base", "GNOME-root", "default-initrd", "installer-resources", "GNOME"),
+    "kde": ("base", "KDE-root", "default-initrd", "installer-resources", "KDE"),
 }
 PACKAGE_FIELDS = ("Packages", "BuildPackages", "InitrdPackages")
 # Required by the host-side mkosi tooling in OBS, not installed into an image.
-EXTRA_PACKAGES = {"python3-pefile", "rpm-build"}
+EXTRA_PACKAGES = {"patterns-proto-build-tools"}
 
 
 def load_summary() -> dict[str, dict]:

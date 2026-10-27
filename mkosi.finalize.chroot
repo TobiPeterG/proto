@@ -6,10 +6,12 @@ set -euo pipefail
 # systemd-boot derives an automatic UKI entry title from PRETTY_NAME in the
 # embedded os-release section. Keep the distribution ID intact for package and
 # extension compatibility, but give the product and boot entry their own name.
+. /usr/lib/proto/branding.conf
 sed -i \
-    -e 's/^NAME=.*/NAME="proto"/' \
-    -e 's/^PRETTY_NAME=.*/PRETTY_NAME="Prototype Image System"/' \
-    /usr/lib/os-release
+    -e "s/^NAME=.*/NAME=\"${NAME}\"/" \
+    -e "s/^PRETTY_NAME=.*/PRETTY_NAME=\"${PRETTY_NAME}\"/" \
+    -e '/^LOGO=/d' /usr/lib/os-release
+printf 'LOGO=%s\n' "${LOGO}" >> /usr/lib/os-release
 
 # New local users get their own Btrfs home subvolume. A user@.service drop-in
 # creates the corresponding per-user Snapper configuration at first login.
@@ -42,10 +44,11 @@ rm -f /usr/share/factory/etc/sysconfig/snapper
 
 # Track the exact vendor-owned content. Future deployments use these hashes to
 # update untouched files and preserve administrator changes.
-/usr/lib/proto-etc-factory seed /usr/share/factory/etc
+IMAGE_ETC_METADATA=.proto-etc-factory.json \
+    /usr/lib/image-etc-factory seed /usr/share/factory/etc
 
 if [[ "${IMAGE_ID}" == proto-gnome ]]; then
     # Compile the desktop-specific vendor override supplied by the GNOME
-    # ExtraTrees source.
+    # gnome-branding-proto RPM.
     glib-compile-schemas /usr/share/glib-2.0/schemas
 fi

@@ -6,7 +6,7 @@ set -euo pipefail
 # partition whose udev event is pending must never be treated as missing.
 # Exit 3 means confirmed absence; all other failures are errors, not permission
 # to provision another USER volume.
-disk="$(/usr/lib/proto-boot-disk)" || exit 1
+disk="$(/usr/lib/image-boot-disk)" || exit 1
 root_type="$(systemd-id128 show --value --uuid root)" || exit 1
 [[ ${root_type} =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || exit 1
 table="$(sfdisk --json "${disk}")" || exit 1

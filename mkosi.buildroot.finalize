@@ -20,20 +20,7 @@ release=${BUILDROOT:?}/usr/lib/os-release
 sed -i '/^SYSEXT_LEVEL=/d' "${release}"
 printf 'SYSEXT_LEVEL="%s"\n' "${level}" >> "${release}"
 
-# Files used by the installed system belong to the desktop root
-source_dir=
-for candidate in "${CHROOT_SRCDIR:?}" /usr/src/packages/SOURCES/*; do
-    if [[ -s ${candidate}/mkosi.keys/obs-project.pgp.b64 ]]; then
-        source_dir=${candidate}
-        break
-    fi
-done
-[[ -n ${source_dir} ]] || {
-    echo 'proto: OBS public key not found while preparing desktop build root' >&2
-    exit 1
-}
+install -d -m 0755 "${BUILDROOT}/usr/lib/proto"
+printf 'IMAGE_ID=%s\nETC_SUBVOLUME=@etc\n' "${IMAGE_ID}" \
+    > "${BUILDROOT}/usr/lib/proto/deployment.env"
 
-install -d -m 0755 "${BUILDROOT:?}/usr/lib/systemd"
-base64 -d "${source_dir}/mkosi.keys/obs-project.pgp.b64" \
-    > "${BUILDROOT}/usr/lib/systemd/import-pubring.pgp"
-chmod 0644 "${BUILDROOT}/usr/lib/systemd/import-pubring.pgp"

@@ -15,7 +15,7 @@ veritysetup status "${source}" >/dev/null || {
     echo 'proto installer: live /usr is not an active verity mapping' >&2
     exit 1
 }
-disk="$(/usr/lib/proto-boot-disk)"
+disk="$(/usr/lib/image-boot-disk)"
 source_disk="$(lsblk -snrpo PATH,TYPE "${source}" | awk '$2 == "disk" {print $1}' | sort -u)"
 if [[ -z ${source_disk} || ${source_disk} == *$'\n'* ||
       $(readlink -f -- "${source_disk}") != "${disk}" ]]; then

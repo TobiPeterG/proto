@@ -4,5 +4,6 @@ set -euo pipefail
 . /usr/lib/os-release
 boot="$(bootctl --print-boot-path)"
 [[ ${boot} == /boot || ${boot} == /efi ]] || exit 1
-exec /usr/lib/proto-etc-factory cleanup --state=/.system \
+export IMAGE_ETC_METADATA=.proto-etc-factory.json
+exec /usr/lib/image-etc-factory cleanup --state=/.system \
     --image-id="${IMAGE_ID:?missing deployment identity}" --boot="${boot}"

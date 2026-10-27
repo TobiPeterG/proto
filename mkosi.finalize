@@ -12,18 +12,22 @@ grep -Fxq "SYSEXT_LEVEL=\"${IMAGE_ID:?}-${IMAGE_VERSION:?}\"" "${root}/usr/lib/o
 
 # mkosi-obs injects the current OBS project certificate for PE/UKI signing.
 # systemd-sysupdate verifies SHA256SUMS.gpg with the corresponding public
-# OpenPGP key embedded in the immutable /usr image.
+# OpenPGP key installed by proto-signing-keys in immutable /usr.
 source_dir=
 for candidate in "${CHROOT_SRCDIR:?}" /usr/src/packages/SOURCES/*; do
-    if [[ -f ${candidate}/mkosi.finalize && -s ${candidate}/mkosi.keys/obs-project.pgp.b64 ]]; then
+    if [[ -f ${candidate}/mkosi.finalize && -f ${candidate}/mkosi.make-installer-addon ]]; then
         source_dir=${candidate}
         break
     fi
 done
 [[ -n ${source_dir} ]] || {
-    echo "mkosi source tree containing the OBS public key not found" >&2
+    echo "mkosi source tree containing the image assembly hooks not found" >&2
     exit 1
 }
+
+install -d -m 0755 "${root}/efi/EFI/BOOT"
+install -m 0644 "${root}/usr/share/proto/keys/home_Tobi_Peter_proto.cer" \
+    "${root}/efi/EFI/BOOT/home_Tobi_Peter_proto.cer"
 
 # mkosi appends io.mkosi.initrd artifacts after the shared default initrd.
 # Use the same os-release as the system and UKI, including its desktop ID.

@@ -6,7 +6,7 @@ updated atomically through a native A/B partition layout.
 
 ## Disk layout
 
-A newly created image normally contains nine GPT partitions:
+The installed system, after first-boot provisioning, contains nine GPT partitions:
 
 1. a 100–256 MiB EFI System Partition containing Shim and systemd-boot;
 2. a 4 GiB XBOOTLDR partition containing versioned UKIs;
@@ -18,10 +18,11 @@ A newly created image normally contains nine GPT partitions:
 8. an empty usr-verity signature slot;
 9. a writable Btrfs `USER` partition occupying the remaining space.
 
-The first `/usr`/Verity set is populated during the image build. The second
-set uses empty partitions, making it available to `systemd-sysupdate`. Both
-system slots have fixed sizes; only the final Btrfs partition grows when the
-image is written to a larger disk.
+The installer artifact contains only ESP, XBOOTLDR and the populated A set.
+Its signed installer add-on creates a persistent Btrfs TIKSTATE root on the
+USB medium. B slots and USER are created on the installation target by repart;
+USER is deferred to first boot when no user data is migrated. Both system
+slots have fixed sizes; the writable Btrfs partition occupies remaining space.
 
 XBOOTLDR is always present and mounted as `/boot`; the ESP is mounted as
 `/efi`. This keeps the ESP compatible with small firmware- or
@@ -33,7 +34,8 @@ The Btrfs partition remains the root partition and has this subvolume layout:
 
 ```text
 @root   mutable root skeleton, /home, /var, /root, /opt, ...
-@etc    persistent system configuration shared by both /usr slots
+@etc    initial factory configuration seed
+@etc-VERSION    persistent configuration for one installed UKI version
 ```
 
 Individual users receive nested Btrfs subvolumes below `/home`, managed by the
@@ -125,13 +127,22 @@ Each desktop produces:
 ### Desktop-specific build roots
 
 `KDE-root` and `GNOME-root` construct each complete desktop filesystem exactly
-once. They own the desktop package list, desktop `mkosi.extra` tree and
-filesystem finalization. The existing `base` image remains an internal common
+once. They select the desktop's `patterns-proto` package and run filesystem
+finalization. Reusable runtime implementations and desktop defaults are owned by
+RPMs defined under [packages](packages/README.md); the root overlays supply the
+image's layout, update sources, boot policy and deployment configuration.
+The existing `base` image remains an internal common
 dependency; it is not the reference filesystem for future desktop extensions.
 Both `base` and the desktop roots retain their RPM databases. The KDE/GNOME
 disk stages use their corresponding root via `BaseTrees=`, install no further
 packages, and explicitly clean package metadata from their own copy before
 creating EROFS/Verity, the initrd, UKI and installer add-on.
+
+The independent `installer-resources` dependency installs the reusable TIK core
+through the installer pattern. Add-on assembly combines it with the image-owned
+`mkosi.installer.*` role, compiles GNOME dconf from its source, and
+builds the sysext/confext images. This resource filesystem is never inherited by
+the desktop roots or shipped as part of their immutable `/usr`.
 
 Each desktop also produces:
 
@@ -173,8 +184,9 @@ signature; authenticated extension images are still required. Updating the OS
 requires matching extensions for its new release before they can be merged.
 The disk packaging and root export reject mismatching compatibility metadata.
 
-Future extension recipes and their update integration
-are separate work; the export alone does not implement those policies.
+The reusable `sysext-manager` discovers compatible signed extensions and creates
+native sysupdate features. Its repository defaults belong to the image tree;
+the manager package itself contains no Proto repository or trust identity.
 
 OBS builds export the corresponding root in the existing per-desktop package.
 Artifact names start with the desktop `ImageId`, so mkosi-obs carries the
@@ -195,10 +207,9 @@ modify natively; only the UKI remains uncompressed. After signatures have been
 attached, the disk is converted directly from Zstd to XZ. Published disk and
 partition images are therefore XZ-only without an oversized OBS disk request.
 
-The complete uncompressed disk is sparse but has a nominal minimum size of
-roughly 28.4 GiB: a 4 GiB XBOOTLDR, a 100–256 MiB ESP, two 8 GiB `/usr`
-slots, two 128 MiB Verity slots and at least 8 GiB Btrfs state. A practical
-target is a 32 GB device or larger.
+The published installer contains only the populated A set. The installed
+layout adds B and encrypted USER; a practical installation target remains a
+32 GB device or larger.
 
 ## Installation
 
