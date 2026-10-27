@@ -42,6 +42,14 @@ def main():
                     for value in config["BaseTrees"]
                 ]
             config["ImageVersion"] = new_version
+    if config["Image"] in ("KDE", "GNOME"):
+        output_dir = config.get("OutputDirectory")
+        if not output_dir:
+            raise ValueError("installer resource dependency requires OutputDirectory")
+        config.setdefault("BuildSources", []).append({
+            "Source": str(Path(output_dir) / "installer-resources"),
+            "Target": ".proto-installer-resources",
+        })
     print(f'proto: {config["Image"]}: source-date epoch {config["SourceDateEpoch"]}',
           file=sys.stderr)
     json.dump(config, sys.stdout)
