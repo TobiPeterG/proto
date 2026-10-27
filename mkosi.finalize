@@ -12,7 +12,7 @@ grep -Fxq "SYSEXT_LEVEL=\"${IMAGE_ID:?}-${IMAGE_VERSION:?}\"" "${root}/usr/lib/o
 
 # mkosi-obs injects the current OBS project certificate for PE/UKI signing.
 # systemd-sysupdate verifies SHA256SUMS.gpg with the corresponding public
-# OpenPGP key installed by proto-signing-keys in immutable /usr.
+# OpenPGP key supplied by the image in immutable /usr.
 source_dir=
 for candidate in "${CHROOT_SRCDIR:?}" /usr/src/packages/SOURCES/*; do
     if [[ -f ${candidate}/mkosi.finalize && -f ${candidate}/mkosi.make-installer-addon ]]; then

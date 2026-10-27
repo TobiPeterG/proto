@@ -3,15 +3,18 @@ set -euo pipefail
 
 : "${IMAGE_ID:?mkosi did not export IMAGE_ID}"
 
-# systemd-boot derives an automatic UKI entry title from PRETTY_NAME in the
-# embedded os-release section. Keep the distribution ID intact for package and
-# extension compatibility, but give the product and boot entry their own name.
-. /usr/lib/proto/branding.conf
-sed -i \
-    -e "s/^NAME=.*/NAME=\"${NAME}\"/" \
-    -e "s/^PRETTY_NAME=.*/PRETTY_NAME=\"${PRETTY_NAME}\"/" \
-    -e '/^LOGO=/d' /usr/lib/os-release
-printf 'LOGO=%s\n' "${LOGO}" >> /usr/lib/os-release
+keyring=/usr/lib/systemd/import-pubring.pgp
+keydir=$(mktemp -d)
+trap 'rm -rf "${keydir}"' EXIT
+if [[ -s ${keyring} ]]; then
+    gpg --homedir "${keydir}" --batch --import "${keyring}"
+fi
+gpg --homedir "${keydir}" --batch --import /usr/share/proto/keys/obs-project.pgp
+gpg --homedir "${keydir}" --batch --export > "${keydir}/combined.pgp"
+[[ -s ${keydir}/combined.pgp ]]
+install -D -m 0644 "${keydir}/combined.pgp" "${keyring}"
+rm -rf "${keydir}"
+trap - EXIT
 
 # New local users get their own Btrfs home subvolume. A user@.service drop-in
 # creates the corresponding per-user Snapper configuration at first login.

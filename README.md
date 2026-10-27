@@ -95,8 +95,8 @@ systemd-pcrlock plugin built and active. The native sockets are enabled, and
 boot services restore firmware/Secure Boot components after reboot.
 
 OBS signing is enabled through `mkosi-obs`. It signs the UKI, bootloader and
-Verity metadata in its second build stage. The public OBS OpenPGP key is stored
-as `/usr/lib/systemd/import-pubring.pgp`, allowing `systemd-sysupdate` to
+Verity metadata in its second build stage. The public OBS OpenPGP key is combined with systemd’s vendor import keyring
+in `/usr/lib/systemd/import-pubring.pgp`, allowing `systemd-sysupdate` to
 authenticate the repository checksum manifest.
 
 ## Building
@@ -104,6 +104,8 @@ authenticate the repository checksum manifest.
 The configuration requires mkosi 27 or newer:
 the `KDE` and `GNOME` dependency targets include their transitive desktop-root
 and base dependencies. `ImageVersion` identifies the resulting release.
+Numeric OBS versions are prefixed with the UTC build date, for example
+`20261027.34.2`.
 
 `mkosi.configure` chooses one `SourceDateEpoch` from the start time of the
 current mkosi invocation. All subimages use the same value, while a later

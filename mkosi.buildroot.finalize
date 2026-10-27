@@ -17,8 +17,12 @@ release=${BUILDROOT:?}/usr/lib/os-release
     echo 'proto: desktop build root has no os-release' >&2
     exit 1
 }
-sed -i '/^SYSEXT_LEVEL=/d' "${release}"
+sed -i '/^SYSEXT_LEVEL=/d; /^VARIANT=/d; /^VARIANT_ID=/d' "${release}"
 printf 'SYSEXT_LEVEL="%s"\n' "${level}" >> "${release}"
+case ${IMAGE_ID} in
+    proto-kde) printf 'VARIANT="KDE Plasma"\nVARIANT_ID=kde\n' >> "${release}" ;;
+    proto-gnome) printf 'VARIANT="GNOME"\nVARIANT_ID=gnome\n' >> "${release}" ;;
+esac
 
 install -d -m 0755 "${BUILDROOT}/usr/lib/proto"
 printf 'IMAGE_ID=%s\nETC_SUBVOLUME=@etc\n' "${IMAGE_ID}" \

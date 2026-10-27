@@ -1,6 +1,8 @@
 #!/usr/bin/python3
 """Select one source-date epoch for this mkosi invocation, including subimages."""
 import json
+from datetime import datetime, timezone
+import re
 import os
 from pathlib import Path
 import sys
@@ -23,6 +25,23 @@ def main():
     # Honour --source-date-epoch and SOURCE_DATE_EPOCH for reproducible replays.
     if config.get("SourceDateEpoch") is None:
         config["SourceDateEpoch"] = invocation_epoch()
+    # mkosi expands %v before configure hooks run.
+    version = config.get("ImageVersion")
+    if version and re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", version):
+        date = datetime.fromtimestamp(config["SourceDateEpoch"], timezone.utc).strftime("%Y%m%d")
+        if not version.startswith(date + "."):
+            new_version = f"{date}.{version}"
+            for field in ("Output", "UnifiedKernelImageFormat"):
+                value = config.get(field)
+                if isinstance(value, str):
+                    config[field] = value.replace(f"_{version}_", f"_{new_version}_")
+            if "BaseTrees" in config:
+                config["BaseTrees"] = [
+                    value.replace(f"_{version}_", f"_{new_version}_")
+                    if isinstance(value, str) else value
+                    for value in config["BaseTrees"]
+                ]
+            config["ImageVersion"] = new_version
     print(f'proto: {config["Image"]}: source-date epoch {config["SourceDateEpoch"]}',
           file=sys.stderr)
     json.dump(config, sys.stdout)
