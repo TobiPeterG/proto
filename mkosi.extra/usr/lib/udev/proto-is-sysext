@@ -1,0 +1,32 @@
+#!/bin/sh
+# Called by udev with the sysfs path of a loop device, its partition, or a
+# dm-verity device. Restrict hiding to loop images in system extension paths.
+set -eu
+
+is_extension_loop() {
+    device=$1
+    for file in "$device/loop/backing_file" "$device/../loop/backing_file"; do
+        [ -r "$file" ] || continue
+        IFS= read -r backing < "$file" || continue
+        case "$backing" in
+            /etc/extensions/*|etc/extensions/*|\
+            /run/extensions/*|run/extensions/*|\
+            /var/lib/extensions/*|var/lib/extensions/*|\
+            /usr/local/lib/extensions/*|usr/local/lib/extensions/*|\
+            /usr/lib/extensions/*|usr/lib/extensions/*)
+                return 0 ;;
+        esac
+    done
+    return 1
+}
+
+[ "$#" -eq 1 ] || exit 1
+if is_extension_loop "$1"; then
+    exit 0
+fi
+# A dm-verity device has the underlying data/hash loop partitions as slaves.
+for slave in "$1"/slaves/*; do
+    [ -e "$slave" ] || continue
+    is_extension_loop "$slave" && exit 0
+done
+exit 1

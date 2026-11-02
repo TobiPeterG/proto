@@ -1,0 +1,3 @@
+# Hide system extension loop images and their verity devices from UDisks UIs.
+SUBSYSTEM=="block", KERNEL=="loop[0-9]*", PROGRAM="/usr/lib/udev/proto-is-sysext /sys%p", ENV{UDISKS_IGNORE}="1"
+SUBSYSTEM=="block", KERNEL=="dm-*", ENV{DM_UUID}=="CRYPT-VERITY-*", PROGRAM="/usr/lib/udev/proto-is-sysext /sys%p", ENV{UDISKS_IGNORE}="1"
