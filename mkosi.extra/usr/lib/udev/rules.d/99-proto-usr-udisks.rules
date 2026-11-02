@@ -1,0 +1,4 @@
+# Hide Proto's installed /usr slots and their associated verity partitions.
+SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_PART_ENTRY_NAME}=="proto-kde_*|proto-gnome_*", ENV{ID_PART_ENTRY_TYPE}=="8484680c-9521-48c6-9c11-b0720656f69e|77ff5f63-e7b6-4633-acf4-1565b864c0e6|e7bb33fb-06cf-4e81-8273-e543b413e2e2|b0e01050-ee5f-4390-949a-9101b17104e9|6e11a4e7-fbca-4ded-b9e9-e1a512bb664e|c23ce4ff-44bd-4b00-b2d4-b41b3419e02a", ENV{UDISKS_IGNORE}="1"
+# systemd-veritysetup names the active /usr mapping "usr".
+SUBSYSTEM=="block", KERNEL=="dm-*", ENV{DM_NAME}=="usr", ENV{DM_UUID}=="CRYPT-VERITY-*", ENV{UDISKS_IGNORE}="1"
